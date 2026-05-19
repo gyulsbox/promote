@@ -1,4 +1,6 @@
+import * as p from "@clack/prompts";
 import { writeFileSync, mkdirSync, existsSync } from "node:fs";
+import { execSync } from "node:child_process";
 import { resolve } from "node:path";
 import chalk from "chalk";
 import { createOctokit, parseRepoRef } from "../../ingest/github-client.js";
@@ -20,10 +22,12 @@ import type { PromotionCandidate, AnalysisStats } from "../../core/types.js";
 import * as out from "../output.js";
 import { mascotSays, mascotHappy } from "../mascot.js";
 import { createTimedSpinner, getClassifyMessage, getDraftMessage, getClusterMessage } from "../thinking.js";
+import { runInteractiveReview } from "./review.js";
+import { applyPromotion } from "./promote.js";
 
 export type ScanOptions = {
-  repo: string;
-  since: string;
+  repo?: string;
+  since?: string;
   config?: string;
   out?: string;
   verbose?: boolean;
@@ -31,8 +35,11 @@ export type ScanOptions = {
 
 export async function runScan(options: ScanOptions) {
   const config = loadConfig(options.config);
-  const repo = parseRepoRef(options.repo);
-  const sinceDays = parseSinceDays(options.since);
+  const repoStr = options.repo ?? detectCurrentRepo();
+  const repo = parseRepoRef(repoStr);
+  const sinceDays = options.since
+    ? parseSinceDays(options.since)
+    : config.thresholds.windowDays;
   const sinceDate = computeSinceDate(sinceDays);
 
   mascotSays(`Scanning ${repo.fullName} (last ${sinceDays} days)`);
@@ -315,9 +322,115 @@ export async function runScan(options: ScanOptions) {
     console.log(chalk.dim(`  ... and ${candidates.length - 3} more in digest`));
   }
 
+  // Check if scanned repo matches current directory's repo
   out.divider();
-  out.info(`Review: ${chalk.bold(digestPath)}`);
-  out.info(`Promote: ${chalk.dim("promote promote candidate_001 --target agents --write")}`);
+
+  const isLocalRepo = checkIsLocalRepo(repo.fullName);
+
+  if (!isLocalRepo) {
+    const remoteAction = await p.select({
+      message: `You scanned ${chalk.bold(repo.fullName)} but this isn't your local repo. Promoting here would write files to your current directory.`,
+      options: [
+        { value: "digest-only", label: "Keep digest only (recommended)", hint: "review and promote in the target repo" },
+        { value: "review", label: "Review anyway", hint: "files will be written to current directory" },
+      ],
+    });
+
+    if (p.isCancel(remoteAction) || remoteAction === "digest-only") {
+      out.info(`Digest saved: ${chalk.bold(digestPath)}`);
+      out.info("Clone the target repo and run promote there to apply changes.");
+      return;
+    }
+  }
+
+  const reviewNow = await p.select({
+    message: "Review candidates now?",
+    options: [
+      { value: "interactive", label: "Yes, review one by one", hint: "decide per candidate" },
+      { value: "later", label: "No, I'll review the digest later", hint: digestPath },
+    ],
+  });
+
+  if (p.isCancel(reviewNow) || reviewNow === "later") {
+    out.info(`Digest: ${chalk.bold(digestPath)}`);
+    out.info(`Promote later: ${chalk.dim("promote promote candidate_001 --target agents --write")}`);
+    return;
+  }
+
+  // Interactive review
+  const actions = await runInteractiveReview(candidates);
+
+  // Apply promotions
+  let promoted = 0;
+  let ignored = 0;
+  let skipped = 0;
+
+  for (const action of actions) {
+    const candidate = candidates.find((c) => c.id === action.candidateId);
+    if (!candidate) continue;
+
+    switch (action.action) {
+      case "promote":
+        await applyPromotion(candidate, candidate.target);
+        promoted++;
+        break;
+      case "change-target":
+        if (action.newTarget) {
+          await applyPromotion(candidate, action.newTarget);
+          promoted++;
+        }
+        break;
+      case "ignore":
+        ignored++;
+        break;
+      case "skip":
+        skipped++;
+        break;
+    }
+  }
+
+  out.divider();
+  if (promoted > 0) mascotHappy(`${promoted} candidate(s) promoted!`);
+  if (ignored > 0) out.info(`${ignored} candidate(s) ignored.`);
+  if (skipped > 0) out.info(`${skipped} candidate(s) skipped for later.`);
+  out.info(`Full digest: ${chalk.bold(digestPath)}`);
+}
+
+function checkIsLocalRepo(scannedRepo: string): boolean {
+  try {
+    const url = execSync("git remote get-url origin", {
+      encoding: "utf-8",
+      stdio: ["pipe", "pipe", "pipe"],
+    }).trim();
+
+    const normalized = scannedRepo.toLowerCase();
+    return url.toLowerCase().includes(normalized);
+  } catch {
+    return false;
+  }
+}
+
+function detectCurrentRepo(): string {
+  try {
+    const url = execSync("git remote get-url origin", {
+      encoding: "utf-8",
+      stdio: ["pipe", "pipe", "pipe"],
+    }).trim();
+
+    // git@github.com:owner/repo.git
+    const sshMatch = url.match(/github\.com[:/]([^/]+\/[^/.]+)/);
+    if (sshMatch) return sshMatch[1];
+
+    // https://github.com/owner/repo.git
+    const httpsMatch = url.match(/github\.com\/([^/]+\/[^/.]+)/);
+    if (httpsMatch) return httpsMatch[1];
+  } catch {
+    // not a git repo or no remote
+  }
+
+  throw new Error(
+    "Could not detect repo. Use --repo owner/repo or run from a git repo with a GitHub remote.",
+  );
 }
 
 function parseSinceDays(since: string): number {
