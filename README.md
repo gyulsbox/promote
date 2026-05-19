@@ -27,6 +27,12 @@ promote does not generate more review comments. It reduces repeated ones over ti
 
 ---
 
+## Demo
+
+![promote init](demo/init.gif)
+
+---
+
 ## Quick start
 
 ### 1. Initialize
@@ -206,17 +212,6 @@ promote picks up what others leave behind.
 - **Evidence first** — every candidate shows the PR comments that caused it
 - **Conservative** — if unsure, skip. Memory files are not a trash can
 - **Tool-agnostic** — works across AI review tools and instruction formats
-
----
-
-## Thesis
-
-This project comes from the article:
-
-> AI review comments are not always just defects in the current PR. Sometimes they reveal implicit knowledge that has not yet been written into the repository. If the same comment appears again in future PRs, it should be promoted into durable memory.
-
-- [Original article (Japanese)](https://zenn.dev/hayden/articles/94e03e33ad288e)
-- [Companion article: Developer attention in the AI era (Japanese)](https://zenn.dev/hayden/articles/bc3b43fa0b3c1a)
 
 ---
 
