@@ -8,7 +8,8 @@
   <a href="#why">Why</a> ·
   <a href="#quick-start">Quick Start</a> ·
   <a href="#supported-tools">Supported Tools</a> ·
-  <a href="#cli-reference">CLI Reference</a>
+  <a href="#cli-reference">CLI Reference</a> ·
+  <a href="#roadmap">Roadmap</a>
 </p>
 
 <p>
@@ -222,7 +223,7 @@ llm:
 - [ ] **Scan history** — `promote history` to view past scans and track promoted rules
 - [ ] **Memory health** — detect stale rules, conflicts, oversized instruction files
 - [ ] **Eval command** — measure classification accuracy against golden dataset
-- [ ] **Landing page + docs** — [better-auth.com](https://better-auth.com)-style site with Fumadocs
+- [ ] **Landing page + docs**
 
 <br />
 
