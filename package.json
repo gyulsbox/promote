@@ -1,10 +1,11 @@
 {
   "name": "promote-cli",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Promote repeated AI review comments into durable repository memory",
   "type": "module",
   "bin": {
-    "promote": "dist/index.js"
+    "promote": "dist/index.js",
+    "promote-cli": "dist/index.js"
   },
   "files": [
     "dist"
