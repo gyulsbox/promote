@@ -1,9 +1,10 @@
 import * as p from "@clack/prompts";
 import { writeFileSync, readFileSync, existsSync, mkdirSync, appendFileSync } from "node:fs";
 import { execSync } from "node:child_process";
-import { resolve } from "node:path";
+import { resolve, dirname } from "node:path";
 import chalk from "chalk";
 import { printWelcome, mascotSays } from "../mascot.js";
+import * as out from "../output.js";
 
 type DetectedKey = {
   provider: string;
@@ -126,7 +127,61 @@ export async function runInit() {
     process.exit(0);
   }
 
-  // 6. Write config
+  // 6. Memory target — where to promote rules
+  const memoryTarget = await p.select({
+    message: "Where should promoted rules be written?",
+    options: [
+      { value: "AGENTS.md", label: "AGENTS.md", hint: "Codex, Copilot coding agent" },
+      { value: "CLAUDE.md", label: "CLAUDE.md", hint: "Claude Code" },
+      { value: ".github/copilot-instructions.md", label: "Copilot instructions", hint: "GitHub Copilot" },
+      { value: "custom", label: "Custom file", hint: "specify your own" },
+    ],
+  });
+
+  if (p.isCancel(memoryTarget)) {
+    p.cancel("Setup cancelled.");
+    process.exit(0);
+  }
+
+  let memoryFile = memoryTarget as string;
+  if (memoryTarget === "custom") {
+    const customPath = await p.text({
+      message: "Custom memory file path:",
+      placeholder: "docs/rules.md",
+    });
+    if (p.isCancel(customPath) || !customPath) {
+      p.cancel("Setup cancelled.");
+      process.exit(0);
+    }
+    memoryFile = customPath;
+  }
+
+  // 6b. Path-scoped rules directory (default based on memory file choice)
+  const defaultPathScoped = getDefaultPathScopedDir(memoryFile);
+  const pathScopedDir = await p.text({
+    message: "Path-scoped rules directory:",
+    placeholder: defaultPathScoped,
+    defaultValue: defaultPathScoped,
+  });
+
+  if (p.isCancel(pathScopedDir)) {
+    p.cancel("Setup cancelled.");
+    process.exit(0);
+  }
+
+  // 6c. ADR directory
+  const adrDir = await p.text({
+    message: "ADR (Architecture Decision Records) directory:",
+    placeholder: "docs/adr",
+    defaultValue: "docs/adr",
+  });
+
+  if (p.isCancel(adrDir)) {
+    p.cancel("Setup cancelled.");
+    process.exit(0);
+  }
+
+  // 7. Write config
   const cwd = process.cwd();
   const configPath = resolve(cwd, ".promote.yml");
   const storageDir = resolve(cwd, ".promote");
@@ -139,6 +194,9 @@ export async function runInit() {
     provider: provider as string,
     language: language as string,
     threshold: threshold as string,
+    memoryFile,
+    pathScopedDir: pathScopedDir as string,
+    adrDir: adrDir as string,
   });
 
   if (!existsSync(storageDir)) {
@@ -156,23 +214,72 @@ export async function runInit() {
     }
   }
 
-  s.stop("Config written.");
+  s.stop("Config written to .promote.yml");
 
-  // 7. Done
+  // 7b. Create/update main memory file with reference instructions
+  const memoryFilePath = resolve(cwd, memoryFile);
+
+  if (!existsSync(memoryFilePath)) {
+    const createIt = await p.confirm({
+      message: `${memoryFile} doesn't exist. Create it with knowledge reference instructions?`,
+    });
+
+    if (!p.isCancel(createIt) && createIt) {
+      const memDir = dirname(memoryFilePath);
+      if (!existsSync(memDir)) {
+        mkdirSync(memDir, { recursive: true });
+      }
+      writeFileSync(
+        memoryFilePath,
+        generateMemoryFileContent({
+          memoryFile,
+          pathScopedDir: pathScopedDir as string,
+          adrDir: adrDir as string,
+        }),
+        "utf-8",
+      );
+      out.success(`Created ${memoryFile}`);
+    }
+  } else {
+    const existing = readFileSync(memoryFilePath, "utf-8");
+    const hasRefs = existing.includes("<!-- managed by promote");
+
+    if (!hasRefs) {
+      const appendRefs = await p.confirm({
+        message: `${memoryFile} already exists. Append knowledge reference instructions to it?`,
+      });
+
+      if (!p.isCancel(appendRefs) && appendRefs) {
+        const refSection = generateReferenceSection({
+          pathScopedDir: pathScopedDir as string,
+          adrDir: adrDir as string,
+        });
+        appendFileSync(memoryFilePath, "\n" + refSection);
+        out.success(`Updated ${memoryFile} with reference instructions`);
+      } else {
+        out.info(`${memoryFile} left unchanged.`);
+      }
+    } else {
+      out.info(`${memoryFile} already has reference instructions.`);
+    }
+  }
+
+  // 8. Done
   console.log();
   mascotSays("You're all set!");
   console.log();
 
   p.note(
     [
-      `${chalk.bold("Scan a repo:")}`,
-      `  promote scan --repo owner/repo`,
+      `${chalk.bold("Scan this repo:")}`,
+      `  promote scan                  # uses git remote + default 60d`,
       ``,
-      `${chalk.bold("Other commands:")}`,
-      `  promote scan --repo owner/repo --since 90d   # custom window`,
+      `${chalk.bold("Scan another repo:")}`,
+      `  promote scan --repo owner/repo --since 90d`,
+      ``,
+      `${chalk.bold("After scan:")}`,
       `  promote promote candidate_001 --target agents --write`,
-      `  promote config                               # edit settings`,
-      `  promote --help                               # all commands`,
+      `  promote --help                # all commands`,
     ].join("\n"),
     "Next steps",
   );
@@ -276,6 +383,9 @@ function generateConfig(opts: {
   provider: string;
   language: string;
   threshold: string;
+  memoryFile: string;
+  pathScopedDir: string;
+  adrDir: string;
 }): string {
   const models = getDefaultModels(opts.provider);
 
@@ -284,6 +394,16 @@ function generateConfig(opts: {
 language:
   preferredOutput: ${opts.language}
   fallback: en
+
+memoryTargets:
+  agents:
+    preferredFiles:
+      - ${opts.memoryFile}
+  pathScoped:
+    preferredDir: ${opts.pathScopedDir}
+  adr:
+    dir: ${opts.adrDir}
+    filenameFormat: "{number}-{slug}.md"
 
 # aiReviewers:
 #   - github-copilot[bot]
@@ -336,4 +456,76 @@ function getDefaultModels(provider: string) {
         embedding: "text-embedding-3-small",
       };
   }
+}
+
+function getDefaultPathScopedDir(memoryFile: string): string {
+  if (memoryFile === "CLAUDE.md" || memoryFile.includes("claude")) {
+    return ".claude/rules";
+  }
+  if (memoryFile === "AGENTS.md") {
+    return "nested AGENTS.md per directory";
+  }
+  return ".github/instructions";
+}
+
+function generateMemoryFileContent(opts: {
+  memoryFile: string;
+  pathScopedDir: string;
+  adrDir: string;
+}): string {
+  const title = opts.memoryFile.replace(/\.md$/, "").toUpperCase();
+
+  return `# ${title}
+
+## Knowledge structure
+
+This repository organizes knowledge in multiple locations. When working on this codebase, check the relevant sources before making changes.
+
+### Repo-wide rules
+
+General conventions and coding standards are documented in this file.
+
+### Path-scoped rules (\`${opts.pathScopedDir}/\`)
+
+Domain-specific rules that apply only to certain directories. Before working in a specific area, check if a scoped rule file exists:
+
+\`\`\`
+${opts.pathScopedDir}/*.instructions.md
+\`\`\`
+
+Each file has a \`applyTo\` frontmatter field specifying which paths it covers.
+
+### Architecture Decision Records (\`${opts.adrDir}/\`)
+
+Decisions about architecture, trade-offs, and design rationale are recorded as ADRs. Before making architectural changes, check existing ADRs:
+
+\`\`\`
+${opts.adrDir}/*.md
+\`\`\`
+
+If you are about to make a decision that changes architecture or has trade-offs, propose a new ADR.
+
+### Test invariants
+
+Some rules are enforced as tests rather than instructions. If a behavior is critical enough that it must not break, look for existing tests before modifying that behavior.
+
+---
+
+<!-- Rules below this line are managed by promote (https://github.com/gyulsbox/promote) -->
+`;
+}
+
+function generateReferenceSection(opts: {
+  pathScopedDir: string;
+  adrDir: string;
+}): string {
+  return `
+## Knowledge structure
+
+- **Path-scoped rules**: Check \`${opts.pathScopedDir}/*.instructions.md\` for domain-specific rules before working in a directory.
+- **ADRs**: Check \`${opts.adrDir}/*.md\` for architecture decisions before making structural changes.
+- **Test invariants**: Critical behaviors are enforced as tests. Check existing tests before modifying behavior.
+
+<!-- Rules below this line are managed by promote (https://github.com/gyulsbox/promote) -->
+`;
 }
