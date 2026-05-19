@@ -1,17 +1,17 @@
 {
   "name": "promote-cli",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Promote repeated AI review comments into durable repository memory",
   "type": "module",
   "bin": {
-    "promote": "./dist/index.js"
+    "promote": "dist/index.js"
   },
   "files": [
     "dist"
   ],
   "repository": {
     "type": "git",
-    "url": "https://github.com/gyulsbox/promote.git"
+    "url": "git+https://github.com/gyulsbox/promote.git"
   },
   "homepage": "https://github.com/gyulsbox/promote",
   "author": "Hayden",
