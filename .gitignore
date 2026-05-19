@@ -1,8 +1,20 @@
 node_modules/
 dist/
+
+# promote local data
 .promote/
 .promote.yml
+
+# claude code
 .claude/
+
+# generated memory files (from init/promote)
+CLAUDE.md
+AGENTS.md
+
+# secrets
 *.env
 .env.*
+
+# OS
 .DS_Store
