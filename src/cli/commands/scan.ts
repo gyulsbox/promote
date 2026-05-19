@@ -128,20 +128,11 @@ export async function runScan(options: ScanOptions) {
       : "No existing memory files found",
   );
 
-  // 7. Classify + Draft (parallel, concurrency 3)
+  // 7. Classify + Draft (parallel with ordered output)
   const CONCURRENCY = 3;
   const total = repeatedClusters.length;
   const candidates: PromotionCandidate[] = [];
-  let completed = 0;
 
-  const mainSpinner = out.spinner("");
-  const mainTimer = createTimedSpinner(
-    mainSpinner,
-    getClassifyMessage,
-    chalk.dim(`[0/${total}]`),
-  );
-
-  // Process all clusters with concurrency limit
   type ClusterResult = {
     index: number;
     candidate: PromotionCandidate | null;
@@ -151,7 +142,57 @@ export async function runScan(options: ScanOptions) {
     confidence?: number;
   };
 
-  const processCluster = async (cluster: typeof repeatedClusters[0], index: number): Promise<ClusterResult> => {
+  // Buffer for ordered output: results[i] is set when task i completes
+  const resultBuffer: (ClusterResult | undefined)[] = new Array(total);
+  let nextToPrint = 0;
+  let candidateNum = 1;
+
+  // Spinner for the currently processing items
+  const activeSpinner = out.spinner("");
+  const activeTimer = createTimedSpinner(
+    activeSpinner,
+    getClassifyMessage,
+    chalk.dim(`[1/${total}]`),
+  );
+
+  // Flush all consecutive completed results from the buffer
+  const flushBuffer = () => {
+    while (nextToPrint < total && resultBuffer[nextToPrint] !== undefined) {
+      const r = resultBuffer[nextToPrint]!;
+      const progress = chalk.dim(`[${r.index + 1}/${total}]`);
+
+      // Stop spinner temporarily to print
+      activeSpinner.clear();
+
+      const cols = process.stdout.columns || 80;
+      const prefix = `  ${progress} `;
+
+      if (r.skipped) {
+        const label = `skip — `;
+        const maxSummary = cols - prefix.length - label.length - 1;
+        const summary = truncate(r.summary, maxSummary);
+        console.log(`${prefix}${chalk.dim("skip")} — ${chalk.dim(summary)}`);
+      } else if (r.candidate) {
+        r.candidate.id = `candidate_${String(candidateNum).padStart(3, "0")}`;
+        candidates.push(r.candidate);
+        const badge = `[${r.target}] `;
+        const suffix = ` (${r.confidence?.toFixed(2)})`;
+        const maxSummary = cols - prefix.length - badge.length - suffix.length - 1;
+        const summary = truncate(r.summary, maxSummary);
+        console.log(`${prefix}${chalk.cyan(`[${r.target}]`)} ${summary} ${chalk.dim(`(${r.confidence?.toFixed(2)})`)}`);
+        candidateNum++;
+      }
+
+      nextToPrint++;
+    }
+
+    // Resume spinner if there's still work
+    if (nextToPrint < total) {
+      activeSpinner.start();
+    }
+  };
+
+  const processCluster = async (cluster: typeof repeatedClusters[0], index: number): Promise<void> => {
     const decision = await classifyCluster({
       cluster,
       model: models.classificationModel,
@@ -161,11 +202,15 @@ export async function runScan(options: ScanOptions) {
     });
 
     if (!decision.clusterValid || decision.target === "none" || decision.target === "pr_only") {
-      return { index, candidate: null, summary: decision.summary ?? "not promotable", skipped: true };
+      resultBuffer[index] = { index, candidate: null, summary: decision.summary ?? "not promotable", skipped: true };
+      flushBuffer();
+      return;
     }
 
     if (decision.confidence < config.thresholds.minConfidence) {
-      return { index, candidate: null, summary: decision.summary ?? "", skipped: true };
+      resultBuffer[index] = { index, candidate: null, summary: decision.summary ?? "", skipped: true };
+      flushBuffer();
+      return;
     }
 
     const draft = await generateDraft({
@@ -176,10 +221,10 @@ export async function runScan(options: ScanOptions) {
       preferredLanguage: config.language.preferredOutput,
     });
 
-    return {
+    resultBuffer[index] = {
       index,
       candidate: {
-        id: "", // assigned after sort
+        id: "",
         repo: repo.fullName,
         clusterId: cluster.id,
         summary: decision.summary,
@@ -205,61 +250,41 @@ export async function runScan(options: ScanOptions) {
       target: decision.target,
       confidence: decision.confidence,
     };
+    flushBuffer();
   };
 
   // Run with concurrency limit
-  const results: ClusterResult[] = [];
   const queue = repeatedClusters.map((c, i) => ({ cluster: c, index: i }));
-  const running: Promise<void>[] = [];
+  let completed = 0;
 
   const runNext = async (): Promise<void> => {
     const item = queue.shift();
     if (!item) return;
 
-    const result = await processCluster(item.cluster, item.index);
-    results.push(result);
+    await processCluster(item.cluster, item.index);
     completed++;
 
-    // Update spinner with progress
-    mainTimer.stop();
-    const progressLabel = chalk.dim(`[${completed}/${total}]`);
-    if (result.skipped) {
-      // Don't log individual skips during parallel — will summarize after
+    // Update spinner progress — show next item being processed
+    activeTimer.stop();
+    if (completed < total) {
+      Object.assign(activeTimer, createTimedSpinner(
+        activeSpinner,
+        getClassifyMessage,
+        chalk.dim(`[${completed + 1}/${total}]`),
+      ));
     }
-    Object.assign(mainTimer, createTimedSpinner(
-      mainSpinner,
-      getClassifyMessage,
-      progressLabel,
-    ));
 
     await runNext();
   };
 
-  // Start CONCURRENCY workers
+  const running: Promise<void>[] = [];
   for (let i = 0; i < Math.min(CONCURRENCY, queue.length); i++) {
     running.push(runNext());
   }
   await Promise.all(running);
 
-  mainTimer.stop();
-  mainSpinner.succeed(`Classified ${total} clusters (${CONCURRENCY} parallel)`);
-
-  // Sort results by original index and print summary
-  results.sort((a, b) => a.index - b.index);
-
-  let candidateNum = 1;
-  for (const r of results) {
-    const progress = chalk.dim(`[${r.index + 1}/${total}]`);
-    if (r.skipped) {
-      console.log(`  ${progress} ${chalk.dim("skip")} — ${r.summary.slice(0, 55)}`);
-    } else if (r.candidate) {
-      r.candidate.id = `candidate_${String(candidateNum).padStart(3, "0")}`;
-      candidates.push(r.candidate);
-      const targetBadge = chalk.cyan(`[${r.target}]`);
-      console.log(`  ${progress} ${targetBadge} ${r.summary.slice(0, 55)} ${chalk.dim(`(${r.confidence?.toFixed(2)})`)}`);
-      candidateNum++;
-    }
-  }
+  activeTimer.stop();
+  activeSpinner.stop();
 
   out.divider();
 
@@ -441,4 +466,10 @@ function parseSinceDays(since: string): number {
   if (!Number.isNaN(num) && num > 0) return num;
 
   throw new Error(`Invalid --since value: "${since}". Use format like "60d" or "60".`);
+}
+
+function truncate(text: string, max: number): string {
+  if (max < 4) return "...";
+  if (text.length <= max) return text;
+  return text.slice(0, max - 3) + "...";
 }
