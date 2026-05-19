@@ -70,6 +70,7 @@ export async function classifyCluster(input: {
   const { object, usage } = await generateObject({
     model,
     schema: routingDecisionSchema,
+    temperature: 0,
     system: CLASSIFICATION_SYSTEM_PROMPT,
     prompt,
   });

@@ -41,6 +41,7 @@ export async function llmCluster(input: {
   const { object, usage } = await generateObject({
     model,
     schema: clusterResultSchema,
+    temperature: 0,
     system: `You group similar AI code review comments together.
 Two comments are similar if they point out the same issue, convention, or pattern — even if worded differently or in different languages.
 Do NOT group comments that are about different topics just because they mention the same file.
