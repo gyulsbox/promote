@@ -63,6 +63,8 @@ Relevant external signals:
 5. **MCP standardizes tools/context for AI applications**, and MCP sampling can let servers request completions through the client’s model, which matters for token ownership and BYOK design.
 6. **Developer AI-tool usage is high but trust is not automatic.** The 2025 Stack Overflow Developer Survey reports that 84% of respondents use or plan to use AI tools in development, and 51% of professional developers use them daily.
 7. **DORA’s 2025 AI-assisted software development report frames AI as an amplifier of organizational systems.** This supports the product premise that better repository memory and review workflows matter more than simply adding more AI tools.
+8. **Developer cognitive load increases with AI automation.** The companion article argues that as AI handles more review and implementation, developers develop "まあいっか" (good enough) psychology — reduced critical scrutiny because "AI checked it." This creates a structural gap: more decisions are made implicitly in AI-generated code, but fewer are consciously captured. The review comment becomes the last visible trace of an implicit decision before it disappears into a merged PR.
+9. **Implicit decisions are being lost at scale.** As AI-generated code volume grows, the number of review comments that contain implicit knowledge also grows. But human attention does not scale. The result is a growing pool of discarded decisions — knowledge that was surfaced once in a review comment and never captured durably.
 
 References are listed at the end of this document.
 
@@ -72,7 +74,7 @@ References are listed at the end of this document.
 
 ### 3.1 One-liner
 
-**Review Memory Router promotes repeated AI review comments into the right repository memory: instructions, ADRs, path-scoped rules, tests, lint rules, or nowhere.**
+**Review Memory Router picks up decisions being lost in AI review comments and promotes them into durable repository memory: instructions, ADRs, path-scoped rules, tests, or nowhere.**
 
 ### 3.2 Product category
 
@@ -121,22 +123,25 @@ Teams lack a workflow for deciding whether repeated AI review comments should be
 
 This creates several problems:
 
-1. **Repeated corrections**  
+1. **Discarded decisions**  
+   AI review comments often contain implicit decisions — why one approach is preferred over another, which utility to use, what invariant must hold. Developers resolve the comment and move on. The decision is never captured. As AI handles more implementation, the volume of these lost decisions grows while human attention to capture them does not.
+
+2. **Repeated corrections**  
    The same AI-generated mistake is corrected again and again.
 
-2. **Memory file pollution**  
+3. **Memory file pollution**  
    Teams may dump too many rules into `AGENTS.md`, `CLAUDE.md`, or Copilot instructions without routing them by scope or enforceability.
 
-3. **Lost architectural reasoning**  
+4. **Lost architectural reasoning**  
    Some comments are not conventions but decisions. They need ADRs, not instruction snippets.
 
-4. **Weak enforcement**  
+5. **Weak enforcement**  
    Some comments represent invariants that should become tests, lint rules, or type constraints.
 
-5. **No evidence trail**  
+6. **No evidence trail**  
    When someone proposes a new rule, maintainers lack evidence showing where the pattern came from.
 
-6. **Tool fragmentation**  
+7. **Tool fragmentation**  
    Different agent tools read different memory files. Teams need routing logic that is not locked to a single AI vendor.
 
 ### 4.3 Why now
@@ -163,6 +168,7 @@ The ecosystem has recently made repository memory more valuable:
 7. Support multiple AI coding ecosystems instead of locking into one memory file format.
 8. Work as OSS for individual developers and maintainers.
 9. Be productizable for teams that want hosted automation and GitHub App integration.
+10. Reduce token consumption in AI implementation and review cycles by ensuring agents read promoted rules upfront instead of generating incorrect code that triggers repeated review corrections.
 
 ### 5.2 Non-goals for MVP
 
@@ -1322,6 +1328,32 @@ Cluster first.
 Call LLM only for repeated clusters.
 ```
 
+### 16.4 Clustering approach: A+B hybrid
+
+The product uses a two-step clustering approach:
+
+**Step A: Algorithmic pre-clustering (cheap)**
+- Generate embeddings for normalized comments
+- Compute weighted similarity: 0.6 semantic + 0.25 identifier overlap + 0.15 path overlap
+- Greedy single-linkage clustering with threshold (default 0.82)
+- AI review comments are structurally easier to cluster than general text: they reference specific paths/identifiers and use action-oriented language
+
+**Step B: LLM refinement (accurate)**
+- Only clusters with >= minOccurrences members reach the LLM
+- LLM validates cluster coherence, may merge or split
+- LLM classifies routing target with structured output
+- One LLM call per repeated cluster (typically 5-20 clusters per scan)
+
+This hybrid minimizes LLM token consumption while maintaining classification accuracy. For MVP, Step A reduces LLM input from hundreds of raw comments to tens of cluster summaries.
+
+### 16.5 Classification prompt sketch
+
+```text
+Ingest all comments.
+Cluster first.
+Call LLM only for repeated clusters.
+```
+
 ### 16.4 Classification prompt sketch
 
 ```text
@@ -1988,7 +2020,47 @@ Likely buyers:
 - Documentation automation tools
 - Static analysis tools
 
-### 23.2 Differentiation
+### 23.2 Detailed competitive comparison
+
+#### CodeRabbit Learnings (closest competing feature)
+
+CodeRabbit has a "Learnings" feature that stores review preferences from `@coderabbitai` chat interactions. It auto-learns from PR conversations and stores them in an internal database accessible at `app.coderabbit.ai/learnings`.
+
+Key differences:
+
+| Dimension | CodeRabbit Learnings | Review Memory Router |
+|---|---|---|
+| Trigger | Manual (@coderabbitai chat) | Automatic (cross-PR pattern detection) |
+| Storage | CodeRabbit internal DB | Repository files (AGENTS.md, ADR, etc.) |
+| Routing | Single destination (internal) | Multiple targets (agents, ADR, test, lint) |
+| PR generation | No | Yes (memory PR with evidence) |
+| Multi-tool | CodeRabbit only | Any AI reviewer |
+| OSS | No (SaaS only) | Yes |
+| Evidence trail | Limited (PR number) | Full (comment → cluster → candidate → PR) |
+
+CodeRabbit Learnings is "tool-internal learning." Review Memory Router is "repo-level knowledge routing." Different layers of the same problem.
+
+#### Other tools
+
+- **Greptile**: Claims to learn from engineers' comments. No explicit cross-PR pattern detection or knowledge promotion. Threat: low.
+- **Qodo Merge**: Has "PR history awareness" but no learning/memory accumulation or promotion features. Threat: low.
+- **GitHub Copilot Review**: No learning or memory features. Only static custom instructions. Threat: high long-term (owns PR comment data and instruction format) but low near-term.
+- **Ellipsis**: Customizes reviews via feedback. No cross-PR analysis. Threat: low.
+
+#### Feature matrix
+
+|                        | Auto pattern detect | Multi-destination routing | Memory PR | Multi-tool | OSS |
+|---|---|---|---|---|---|
+| CodeRabbit Learnings   | No (manual)         | No (internal DB)          | No        | No         | No  |
+| Greptile               | Partial             | No                        | No        | No         | No  |
+| Qodo Merge             | No                  | No                        | No        | No         | Partial |
+| Copilot Review         | No                  | No                        | No        | N/A        | N/A |
+| Ellipsis               | No                  | No                        | No        | No         | No  |
+| Review Memory Router   | Yes                 | Yes                       | Yes       | Yes        | Yes |
+
+No existing tool does end-to-end "AI review comment → routing decision → memory PR." The gap is real and currently unfilled.
+
+### 23.3 Differentiation
 
 | Dimension | AI review tools | Review Memory Router |
 |---|---|---|
@@ -2000,7 +2072,7 @@ Likely buyers:
 | Scope | Tool-specific | Memory-file agnostic |
 | Risk | More noise | Memory pollution if not conservative |
 
-### 23.3 Wedge
+### 23.4 Wedge
 
 Do not compete with review tools. Consume their output.
 
@@ -2773,6 +2845,7 @@ If the same comment appears again and again, the repository may be missing a rul
 ## 37. References
 
 - Hayden, “レビューコメントは、AIの記憶に昇格されるべきなのか”, Zenn.
+- Hayden, “AIが見てくれている安心感は便利だった。でも...”, Zenn.
 - GitHub Docs, “Adding repository custom instructions for GitHub Copilot”.
 - GitHub Changelog, “Copilot coding agent now supports AGENTS.md custom instructions”, 2025-08-28.
 - OpenAI Developers, “Custom instructions with AGENTS.md – Codex”.
