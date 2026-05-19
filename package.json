@@ -1,0 +1,52 @@
+{
+  "name": "promote-cli",
+  "version": "0.1.0",
+  "description": "Promote repeated AI review comments into durable repository memory",
+  "type": "module",
+  "bin": {
+    "promote": "./dist/index.js"
+  },
+  "scripts": {
+    "dev": "tsx src/index.ts",
+    "build": "tsup",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "keywords": [
+    "ai",
+    "code-review",
+    "agents-md",
+    "claude-md",
+    "repository-memory",
+    "developer-tools"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "@ai-sdk/anthropic": "^3.0.78",
+    "@ai-sdk/google": "^3.0.75",
+    "@ai-sdk/openai": "^3.0.64",
+    "@clack/prompts": "^1.4.0",
+    "ai": "^6.0.185",
+    "better-sqlite3": "^12.10.0",
+    "chalk": "^5.6.2",
+    "commander": "^14.0.3",
+    "drizzle-orm": "^0.45.2",
+    "octokit": "^5.0.5",
+    "ora": "^9.4.0",
+    "yaml": "^2.9.0",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^25.9.0",
+    "drizzle-kit": "^0.31.10",
+    "tsup": "^8.5.1",
+    "tsx": "^4.22.3",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.6"
+  }
+}
