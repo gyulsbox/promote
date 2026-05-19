@@ -1,6 +1,8 @@
 node_modules/
 dist/
 .promote/
+.promote.yml
+.claude/
 *.env
 .env.*
 .DS_Store
