@@ -1,5 +1,5 @@
 import * as p from "@clack/prompts";
-import { writeFileSync, mkdirSync, existsSync } from "node:fs";
+import { writeFileSync, readFileSync, mkdirSync, existsSync } from "node:fs";
 import { execSync } from "node:child_process";
 import { resolve } from "node:path";
 import chalk from "chalk";
@@ -24,6 +24,21 @@ import { mascotSays, mascotHappy } from "../mascot.js";
 import { createTimedSpinner, getClassifyMessage, getDraftMessage, getClusterMessage } from "../thinking.js";
 import { runInteractiveReview } from "./review.js";
 import { applyPromotion } from "./promote.js";
+
+const CLOSING_QUOTES: Record<string, string[]> = {
+  en: [
+    "\"The human reviewer's role is no longer to trace code details,",
+    " but to measure the distance between decisions and implementation.\"",
+  ],
+  ko: [
+    "\"AI 시대의 인간 리뷰어의 역할은 코드의 세부를 추적하는 것이 아니라,",
+    " 의사결정과 구현의 거리를 측정하는 것으로 이동하고 있다.\"",
+  ],
+  ja: [
+    "\"人間のレビューはコードの細部を追う行為から、",
+    " 意思決定と実装の距離を測る行為へ移っていく。\"",
+  ],
+};
 
 export type ScanOptions = {
   repo?: string;
@@ -415,10 +430,60 @@ export async function runScan(options: ScanOptions) {
   }
 
   out.divider();
-  if (promoted > 0) mascotHappy(`${promoted} candidate(s) promoted!`);
-  if (ignored > 0) out.info(`${ignored} candidate(s) ignored.`);
+
+  if (promoted > 0) {
+    mascotHappy(`Done! ${promoted} candidate(s) promoted.`);
+    console.log();
+
+    // Show what was written where
+    const promotedCandidates = candidates.filter((c) =>
+      actions.some((a) => a.candidateId === c.id && (a.action === "promote" || a.action === "change-target")),
+    );
+
+    console.log(chalk.bold("  Files modified:"));
+    const fileGroups: Record<string, string[]> = {};
+    for (const c of promotedCandidates) {
+      const file = c.suggestedFile ?? c.target;
+      if (!fileGroups[file]) fileGroups[file] = [];
+      fileGroups[file].push(c.summary);
+    }
+    for (const [file, summaries] of Object.entries(fileGroups)) {
+      console.log(`    ${chalk.cyan(file)}`);
+      for (const s of summaries) {
+        console.log(chalk.dim(`      + ${s}`));
+      }
+    }
+    console.log();
+
+    // Preview first promoted file
+    const firstFile = Object.keys(fileGroups)[0];
+    if (firstFile) {
+      const fullPath = resolve(process.cwd(), firstFile);
+      if (existsSync(fullPath)) {
+        const content = readFileSync(fullPath, "utf-8");
+        const lines = content.split("\n").slice(-10);
+        console.log(chalk.dim(`  Preview (${firstFile}, last 10 lines):`));
+        for (const line of lines) {
+          console.log(chalk.dim(`    ${line}`));
+        }
+        console.log();
+      }
+    }
+  }
+
   if (skipped > 0) out.info(`${skipped} candidate(s) skipped for later.`);
   out.info(`Full digest: ${chalk.bold(digestPath)}`);
+
+  if (promoted > 0) {
+    out.divider();
+    const quote = CLOSING_QUOTES[config.language.preferredOutput] ?? CLOSING_QUOTES.en;
+    console.log();
+    for (const line of quote) {
+      console.log(chalk.dim.italic(`  ${line}`));
+    }
+    console.log();
+    out.info("Review the modified files, then commit when ready.");
+  }
 }
 
 function checkIsLocalRepo(scannedRepo: string): boolean {
