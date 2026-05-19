@@ -39,19 +39,19 @@ If the same comment appears next week, the team pays the same review cost again.
 
 ## Demo
 
-### Scan
-
-<div align="center">
-
-![promote scan](demo/scan.gif)
-
-</div>
-
 ### Init
 
 <div align="center">
 
 ![promote init](demo/init.gif)
+
+</div>
+
+### Scan
+
+<div align="center">
+
+![promote scan](demo/scan.gif)
 
 </div>
 
