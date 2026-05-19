@@ -30,58 +30,91 @@ export async function runInteractiveReview(
     const num = `${i + 1}/${candidates.length}`;
 
     // Show candidate details
-    p.note(
-      [
-        `${chalk.bold(c.summary)}`,
-        ``,
-        `Target: ${chalk.cyan(c.target)}${c.suggestedFile ? ` → ${c.suggestedFile}` : ""}`,
-        `Confidence: ${c.confidence}`,
-        `Occurrences: ${c.occurrences.length}`,
-        c.pathScope ? `Path scope: ${c.pathScope}` : null,
-        ``,
-        chalk.dim("Evidence:"),
-        ...c.occurrences.slice(0, 3).map(
-          (o) => chalk.dim(`  PR #${o.prNumber}${o.path ? ` ${o.path}` : ""}`),
-        ),
-        c.occurrences.length > 3 ? chalk.dim(`  ... +${c.occurrences.length - 3} more`) : null,
-        ``,
-        chalk.dim("Suggested patch:"),
-        chalk.dim(c.draft.content.split("\n").slice(0, 6).map((l) => `  ${l}`).join("\n")),
-        c.draft.content.split("\n").length > 6 ? chalk.dim("  ...") : null,
-      ]
-        .filter(Boolean)
-        .join("\n"),
-      `Candidate ${num}: ${c.id}`,
-    );
+    console.log();
+    console.log(chalk.bold.cyan(`  ─── Candidate ${num} ───`));
+    console.log();
+    console.log(`  ${chalk.bold(c.summary)}`);
+    console.log();
+    console.log(`  ${chalk.dim("Target")}      ${chalk.cyan(c.target)}${c.suggestedFile ? chalk.dim(` → ${c.suggestedFile}`) : ""}`);
+    console.log(`  ${chalk.dim("Confidence")}  ${c.confidence}`);
+    console.log(`  ${chalk.dim("Occurrences")} ${c.occurrences.length}`);
+    if (c.pathScope) {
+      console.log(`  ${chalk.dim("Path scope")}  ${c.pathScope}`);
+    }
+    console.log();
 
-    const action = await p.select({
-      message: `What do you want to do with this candidate?`,
-      options: [
-        {
-          value: "promote",
-          label: `Promote → ${c.target}`,
-          hint: c.suggestedFile ?? "",
-        },
-        {
-          value: "change-target",
-          label: "Promote (different target)",
-          hint: "choose where to put it",
-        },
-        {
-          value: "skip",
-          label: "Skip for now",
-          hint: "will appear in next scan",
-        },
-        {
-          value: "ignore",
-          label: "Ignore permanently",
-          hint: "won't appear again",
-        },
-      ],
-    });
+    // Evidence
+    console.log(`  ${chalk.dim("Evidence:")}`);
+    for (const o of c.occurrences.slice(0, 3)) {
+      console.log(`    ${chalk.dim("PR #" + o.prNumber)} ${o.path ?? ""}`);
+    }
+    if (c.occurrences.length > 3) {
+      console.log(chalk.dim(`    +${c.occurrences.length - 3} more`));
+    }
+    console.log();
+
+    // Patch preview
+    console.log(`  ${chalk.dim("Patch:")}`);
+    const patchLines = c.draft.content.split("\n").slice(0, 8);
+    for (const line of patchLines) {
+      console.log(chalk.green(`    ${line}`));
+    }
+    if (c.draft.content.split("\n").length > 8) {
+      console.log(chalk.dim("    ..."));
+    }
+    console.log();
+
+    // Show full patch if truncated
+    const patchTruncated = c.draft.content.split("\n").length > 8;
+
+    let action: string | symbol;
+
+    // Loop to allow "show full" then come back to decision
+    while (true) {
+      action = await p.select({
+        message: `What do you want to do with this candidate?`,
+        options: [
+          {
+            value: "promote",
+            label: `Promote → ${c.target}`,
+            hint: c.suggestedFile ?? "",
+          },
+          {
+            value: "change-target",
+            label: "Promote (different target)",
+            hint: "choose where to put it",
+          },
+          ...(patchTruncated
+            ? [{ value: "show-full", label: "Show full patch", hint: "see complete content" }]
+            : []),
+          {
+            value: "skip",
+            label: "Skip",
+            hint: "move to next candidate",
+          },
+        ],
+      });
+
+      if (p.isCancel(action)) {
+        mascotSays("Review cancelled. Remaining candidates saved in digest.");
+        return actions;
+      }
+
+      if (action === "show-full") {
+        console.log();
+        console.log(chalk.dim("  ─── Full patch ───"));
+        console.log();
+        for (const line of c.draft.content.split("\n")) {
+          console.log(chalk.green(`    ${line}`));
+        }
+        console.log();
+        continue; // back to action selection
+      }
+
+      break; // got a real action
+    }
 
     if (p.isCancel(action)) {
-      mascotSays("Review cancelled. Remaining candidates saved in digest.");
       break;
     }
 
