@@ -29,6 +29,12 @@ promote does not generate more review comments. It reduces repeated ones over ti
 
 ## Demo
 
+### Scan
+
+![promote scan](demo/scan.gif)
+
+### Init
+
 ![promote init](demo/init.gif)
 
 ---
