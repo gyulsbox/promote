@@ -26,6 +26,14 @@ export async function applyPromotion(
 ) {
   const config = loadConfig();
   const targetFile = resolveTargetFile(target, candidate, config);
+
+  // Validate file path — reject obviously wrong paths
+  if (!isValidFilePath(targetFile)) {
+    out.warn(`${candidate.id}: target "${target}" doesn't produce a writable file.`);
+    out.info(`  See the digest for details. Skipping.`);
+    return;
+  }
+
   const cwd = process.cwd();
   const fullPath = resolve(cwd, targetFile);
 
@@ -54,6 +62,20 @@ export async function applyPromotion(
 
   writeFileSync(fullPath, newContent, "utf-8");
   out.success(`Promoted to ${chalk.bold(targetFile)}: ${candidate.summary}`);
+}
+
+function isValidFilePath(filePath: string): boolean {
+  // Reject placeholder/invalid paths
+  if (filePath.startsWith("(")) return false;
+  if (filePath.includes("—")) return false;
+  if (!filePath.includes(".") && !filePath.includes("/")) return false;
+
+  // Must end with a file extension or be a known file
+  const knownFiles = ["AGENTS.md", "CLAUDE.md", "README.md"];
+  if (knownFiles.includes(filePath)) return true;
+  if (/\.\w{1,10}$/.test(filePath)) return true;
+
+  return false;
 }
 
 /**
@@ -118,8 +140,8 @@ function resolveTargetFile(
   candidate: { suggestedFile?: string | null; pathScope?: string | null },
   config: ReturnType<typeof loadConfig>,
 ): string {
-  // If candidate has a suggested file, use it
-  if (candidate.suggestedFile && candidate.suggestedFile !== "(test file)" && candidate.suggestedFile !== "(auto)") {
+  // If candidate has a suggested file, validate and use it
+  if (candidate.suggestedFile && isValidFilePath(candidate.suggestedFile)) {
     return candidate.suggestedFile;
   }
 
@@ -139,7 +161,7 @@ function resolveTargetFile(
       return `${dir}/NNN-title.md`;
     }
     case "test":
-      return "(test recommendation — see digest)";
+      return "(test — see digest for details)";
     default:
       return "AGENTS.md";
   }
