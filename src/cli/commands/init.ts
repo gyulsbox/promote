@@ -127,14 +127,17 @@ export async function runInit() {
     process.exit(0);
   }
 
-  // 6. Memory target — where to promote rules
+  // 6. Memory target — which AI tool's instruction format
   const memoryTarget = await p.select({
-    message: "Where should promoted rules be written?",
+    message: "Which AI coding tool do you primarily use?",
     options: [
-      { value: "AGENTS.md", label: "AGENTS.md", hint: "Codex, Copilot coding agent" },
-      { value: "CLAUDE.md", label: "CLAUDE.md", hint: "Claude Code" },
-      { value: ".github/copilot-instructions.md", label: "Copilot instructions", hint: "GitHub Copilot" },
-      { value: "custom", label: "Custom file", hint: "specify your own" },
+      { value: "claude", label: "Claude Code", hint: "CLAUDE.md + .claude/rules/" },
+      { value: "codex", label: "OpenAI Codex", hint: "AGENTS.md + nested AGENTS.md" },
+      { value: "copilot", label: "GitHub Copilot", hint: ".github/copilot-instructions.md + .github/instructions/" },
+      { value: "cursor", label: "Cursor", hint: ".cursorrules + .cursor/rules/*.mdc" },
+      { value: "windsurf", label: "Windsurf", hint: ".windsurfrules + .windsurf/rules/" },
+      { value: "gemini", label: "Gemini CLI", hint: "GEMINI.md + nested GEMINI.md" },
+      { value: "custom", label: "Custom", hint: "specify your own file" },
     ],
   });
 
@@ -143,10 +146,12 @@ export async function runInit() {
     process.exit(0);
   }
 
-  let memoryFile = memoryTarget as string;
-  if (memoryTarget === "custom") {
+  const toolConfig = TOOL_CONFIGS[memoryTarget as string];
+  let memoryFile: string;
+
+  if (!toolConfig) {
     const customPath = await p.text({
-      message: "Custom memory file path:",
+      message: "Custom root instruction file path:",
       placeholder: "docs/rules.md",
     });
     if (p.isCancel(customPath) || !customPath) {
@@ -154,10 +159,12 @@ export async function runInit() {
       process.exit(0);
     }
     memoryFile = customPath;
+  } else {
+    memoryFile = toolConfig.rootFile;
   }
 
-  // 6b. Path-scoped rules directory (default based on memory file choice)
-  const defaultPathScoped = getDefaultPathScopedDir(memoryFile);
+  // 6b. Path-scoped rules directory
+  const defaultPathScoped = toolConfig?.pathScopedDir ?? ".github/instructions";
   const pathScopedDir = await p.text({
     message: "Path-scoped rules directory:",
     placeholder: defaultPathScoped,
@@ -234,6 +241,8 @@ export async function runInit() {
         generateMemoryFileContent({
           memoryFile,
           pathScopedDir: pathScopedDir as string,
+          pathScopedExt: toolConfig?.pathScopedExt ?? "*.md",
+          pathScopedFormat: toolConfig?.pathScopedFormat ?? "Markdown files",
           adrDir: adrDir as string,
         }),
         "utf-8",
@@ -252,6 +261,7 @@ export async function runInit() {
       if (!p.isCancel(appendRefs) && appendRefs) {
         const refSection = generateReferenceSection({
           pathScopedDir: pathScopedDir as string,
+          pathScopedFormat: toolConfig?.pathScopedFormat ?? "Markdown files",
           adrDir: adrDir as string,
         });
         appendFileSync(memoryFilePath, "\n" + refSection);
@@ -458,56 +468,82 @@ function getDefaultModels(provider: string) {
   }
 }
 
-function getDefaultPathScopedDir(memoryFile: string): string {
-  if (memoryFile === "CLAUDE.md" || memoryFile.includes("claude")) {
-    return ".claude/rules";
-  }
-  if (memoryFile === "AGENTS.md") {
-    return "nested AGENTS.md per directory";
-  }
-  return ".github/instructions";
-}
+type ToolConfig = {
+  rootFile: string;
+  pathScopedDir: string;
+  pathScopedExt: string;
+  pathScopedFormat: string; // description for the memory file
+};
+
+const TOOL_CONFIGS: Record<string, ToolConfig> = {
+  claude: {
+    rootFile: "CLAUDE.md",
+    pathScopedDir: ".claude/rules",
+    pathScopedExt: "*.instructions.md",
+    pathScopedFormat: "YAML frontmatter with `applyTo` globs",
+  },
+  codex: {
+    rootFile: "AGENTS.md",
+    pathScopedDir: "(nested AGENTS.md per directory)",
+    pathScopedExt: "AGENTS.md",
+    pathScopedFormat: "Place AGENTS.md in each subdirectory for scoped rules",
+  },
+  copilot: {
+    rootFile: ".github/copilot-instructions.md",
+    pathScopedDir: ".github/instructions",
+    pathScopedExt: "*.instructions.md",
+    pathScopedFormat: "YAML frontmatter with `applyTo` globs",
+  },
+  cursor: {
+    rootFile: ".cursorrules",
+    pathScopedDir: ".cursor/rules",
+    pathScopedExt: "*.mdc",
+    pathScopedFormat: "MDC with `description`, `alwaysApply`, and `globs` frontmatter",
+  },
+  windsurf: {
+    rootFile: ".windsurfrules",
+    pathScopedDir: ".windsurf/rules",
+    pathScopedExt: "*.md",
+    pathScopedFormat: "Plain text rules (6KB limit per file)",
+  },
+  gemini: {
+    rootFile: "GEMINI.md",
+    pathScopedDir: "(nested GEMINI.md per directory)",
+    pathScopedExt: "GEMINI.md",
+    pathScopedFormat: "Place GEMINI.md in each subdirectory for scoped rules",
+  },
+};
 
 function generateMemoryFileContent(opts: {
   memoryFile: string;
   pathScopedDir: string;
+  pathScopedExt: string;
+  pathScopedFormat: string;
   adrDir: string;
 }): string {
-  const title = opts.memoryFile.replace(/\.md$/, "").toUpperCase();
+  const title = opts.memoryFile.replace(/^\./, "").replace(/\.md$/, "").replace(/rules$/, "").trim().toUpperCase() || "INSTRUCTIONS";
 
   return `# ${title}
 
 ## Knowledge structure
 
-This repository organizes knowledge in multiple locations. When working on this codebase, check the relevant sources before making changes.
+This repository organizes knowledge in multiple locations.
+Check the relevant sources before making changes.
 
 ### Repo-wide rules
-
 General conventions and coding standards are documented in this file.
 
 ### Path-scoped rules (\`${opts.pathScopedDir}/\`)
-
-Domain-specific rules that apply only to certain directories. Before working in a specific area, check if a scoped rule file exists:
-
-\`\`\`
-${opts.pathScopedDir}/*.instructions.md
-\`\`\`
-
-Each file has a \`applyTo\` frontmatter field specifying which paths it covers.
+Domain-specific rules that apply only to certain directories.
+Format: ${opts.pathScopedFormat}
 
 ### Architecture Decision Records (\`${opts.adrDir}/\`)
-
-Decisions about architecture, trade-offs, and design rationale are recorded as ADRs. Before making architectural changes, check existing ADRs:
-
-\`\`\`
-${opts.adrDir}/*.md
-\`\`\`
-
-If you are about to make a decision that changes architecture or has trade-offs, propose a new ADR.
+Decisions about architecture, trade-offs, and design rationale.
+Check existing ADRs before making architectural changes.
 
 ### Test invariants
-
-Some rules are enforced as tests rather than instructions. If a behavior is critical enough that it must not break, look for existing tests before modifying that behavior.
+Some rules are enforced as tests rather than instructions.
+Check existing tests before modifying critical behavior.
 
 ---
 
@@ -517,14 +553,15 @@ Some rules are enforced as tests rather than instructions. If a behavior is crit
 
 function generateReferenceSection(opts: {
   pathScopedDir: string;
+  pathScopedFormat: string;
   adrDir: string;
 }): string {
   return `
 ## Knowledge structure
 
-- **Path-scoped rules**: Check \`${opts.pathScopedDir}/*.instructions.md\` for domain-specific rules before working in a directory.
+- **Path-scoped rules**: Check \`${opts.pathScopedDir}/\` for domain-specific rules. Format: ${opts.pathScopedFormat}
 - **ADRs**: Check \`${opts.adrDir}/*.md\` for architecture decisions before making structural changes.
-- **Test invariants**: Critical behaviors are enforced as tests. Check existing tests before modifying behavior.
+- **Test invariants**: Critical behaviors are enforced as tests.
 
 <!-- Rules below this line are managed by promote (https://github.com/gyulsbox/promote) -->
 `;
