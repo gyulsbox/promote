@@ -464,7 +464,23 @@ Install GitHub App
 -> app opens memory PR
 ```
 
-### 11.5 MCP as power-user interface
+### 11.5 Implementation decisions (from MVP development)
+
+The following decisions were made during implementation:
+
+1. **LLM direct clustering for providers without embeddings.** Anthropic does not offer an embedding API. When the user selects Anthropic as the LLM provider, clustering is performed by sending all comments to the LLM and asking it to group similar ones, instead of using embedding-based pre-clustering. This removes the need for a second API key. Temperature is set to 0 for determinism.
+
+2. **Interactive review flow after scan.** After classification completes, the CLI offers an interactive review mode where the user can approve, skip, or change the target for each candidate one by one. This replaces the original digest-only output model with an optional in-CLI decision workflow.
+
+3. **Parallel classification with ordered output.** Classification runs with concurrency 3 to reduce total wall time, but results are buffered and printed in the original cluster order. This gives the user a consistent, readable output while benefiting from parallelism.
+
+4. **Auto-detect repository from git remote.** When `--repo` is omitted, the CLI reads the current directory's `git remote get-url origin` and extracts the `owner/repo` format. This enables `promote scan` with zero arguments.
+
+5. **Remote repo guard.** If the scanned repository does not match the current directory's git remote, the CLI warns the user that promoting will write files to the current directory, which may cause unintended pollution. The user can choose to proceed or keep the digest only.
+
+6. **Multi-tool instruction file support.** The `promote init` command offers tool-specific presets for Claude Code, OpenAI Codex, GitHub Copilot, Cursor, Windsurf, and Gemini CLI, each with correct root instruction file and path-scoped rule directory defaults.
+
+### 11.6 MCP as power-user interface
 
 MCP should not be the first interface, but the architecture should not block it.
 
@@ -2681,6 +2697,64 @@ review-memory-router promote candidate_001 --target agents --create-pr
 - MCP server.
 - Eval dataset.
 - Memory health checks.
+- Landing page + documentation site.
+
+---
+
+## 32.5 Landing page and documentation
+
+### Design reference
+
+[better-auth.com](https://better-auth.com/) — clean, modern, developer-focused.
+
+### Tech stack
+
+- Next.js + Fumadocs (fumadocs-ui + fumadocs-mdx)
+- Tailwind CSS + tailwind-merge
+- Shiki (code highlighting)
+- next-themes (dark/light mode)
+- MDX-based docs
+
+### Landing page structure
+
+- Hero: one-liner + terminal demo GIF + CTA (GitHub, npm)
+- Trust: "Works with" logos (CodeRabbit, Copilot, Claude Code, Cursor, Windsurf, Gemini, Greptile)
+- Features: routing taxonomy visualization (none → agents → ADR → test)
+- Code example: sample digest + promote command
+- Before/After: repeated comment → promoted rule
+- Evidence: real repo sample digest
+
+### Docs structure
+
+```
+/docs
+  /getting-started     # install, first scan, config
+  /concepts            # routing taxonomy, clustering, promotion lifecycle
+  /cli                 # command reference
+  /configuration       # .promote.yml reference
+  /tools               # per-tool setup (Claude, Codex, Copilot, Cursor, Windsurf, Gemini)
+  /evaluation          # eval dataset, accuracy metrics
+  /mcp                 # MCP server setup
+```
+
+### Timing
+
+After MVP public launch. README drives initial adoption; landing page + docs follow within 1-2 weeks.
+
+### Multi-tool instruction file reference
+
+The product supports multiple AI coding tools, each with different instruction file formats:
+
+| Tool | Root instruction | Path-scoped rules | Format |
+|---|---|---|---|
+| Claude Code | `CLAUDE.md` | `.claude/rules/*.instructions.md` | YAML frontmatter with `applyTo` globs |
+| OpenAI Codex | `AGENTS.md` | Nested `AGENTS.md` per directory | Cascading hierarchy |
+| GitHub Copilot | `.github/copilot-instructions.md` | `.github/instructions/*.instructions.md` | YAML frontmatter with `applyTo` globs |
+| Cursor | `.cursorrules` | `.cursor/rules/*.mdc` | MDC with `description`, `alwaysApply`, `globs` |
+| Windsurf | `.windsurfrules` | `.windsurf/rules/*.md` | Plain text (6KB limit per file) |
+| Gemini CLI | `GEMINI.md` | Nested `GEMINI.md` per directory | Directory hierarchy |
+
+The `promote init` command auto-configures the correct file paths based on the user's tool selection.
 
 ---
 
