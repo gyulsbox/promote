@@ -9,6 +9,7 @@
   <a href="#how-it-works">How</a> ·
   <a href="#quick-start">Quick start</a> ·
   <a href="#what-makes-it-different">Features</a> ·
+  <a href="#cost--mode-trade-off">Cost</a> ·
   <a href="#cli-reference">CLI</a> ·
   <a href="#roadmap">Roadmap</a>
 </p>
@@ -82,7 +83,7 @@ flowchart LR
 - **Classify** — picks a target: agents-level rule, path-scoped rule, ADR, test recommendation, or `none`
 - **Promote** — drafts a patch, links the source comments, hands it to you to approve
 
-Conservative by default — every promotion is human-confirmed, and low-confidence patterns route to `none` instead of guessing.
+Conservative by default — every promotion is human-confirmed, and clusters dropped during classify (low confidence, not promotable, already handled) surface in the digest's `Filtered out` appendix with the classifier's reasoning, instead of being silently discarded.
 
 <br />
 
@@ -106,7 +107,7 @@ promote init
 promote scan --since 30d
 ```
 
-**3. Review.** Approve, ignore, or snooze each candidate — approved ones land in your chosen target file immediately.
+**3. Review.** Walk through each candidate — promote or skip per item. Approved ones land in your chosen target file immediately.
 
 ```
 ─── Candidate 1/7 ───
@@ -123,9 +124,33 @@ Occurrences 3 across 2 PRs
 > Skip
 ```
 
+After the candidates, if anything was filtered out during classify you can browse those too, and any candidates you skipped can be appended to the digest for team review:
+
+```
+Also walk through 4 skipped item(s)?
+> Walk through them one by one
+> Skip all
+
+─── Skipped 1/4 ───
+
+Tests should import vitest helpers explicitly
+
+Reason      below confidence threshold
+Target      agents
+Confidence  0.62
+Detail      Pattern only appeared in 2 PRs; below minConfidence threshold
+
+> Next
+> Skip remaining
+
+Add 2 skipped candidate(s) to digest for team review? (Y/n)
+```
+
+For permanent dismissal or deferral outside the interactive flow, use `promote ignore <id>` or `promote snooze <id>` directly.
+
 BYOK — you bring your own API key. promote never proxies through a server.
 
-**4. (optional) Save a digest.** Pass `--out` to write the scan results as a markdown summary — handy for PR descriptions, weekly review threads, or CI artifacts.
+**4. (optional) Save a digest.** Every `promote scan` writes a digest to `.promote/digests/{date}.md` by default — pass `--out` to override the path. The digest carries the promotion candidates plus a `Filtered out` appendix listing every cluster the classifier dropped (with its reason), and a `Skipped during review` section if you deferred candidates during interactive review. Handy for PR descriptions, weekly team reviews, or CI artifacts.
 
 ```bash
 promote scan --since 30d --out promote-digest.md
@@ -141,9 +166,34 @@ Output is localized per `language.preferredOutput` in `.promote.yml` (en / ko / 
 - **Multi-tool aware.** Routes the same finding to `CLAUDE.md`, `AGENTS.md`, `.github/copilot-instructions.md`, `.cursor/rules/`, `.windsurf/rules/`, or `GEMINI.md` — pick at `init`, change anytime.
 - **Multi-provider BYOK.** OpenAI, Anthropic, or Google. No hosted backend, no proxy. Free tier available on Google.
 - **Reads human signal.** Picks up reply threads ("this is intentional"), 👍/👎 reactions, and reviewer agreement; boosts confidence when 2+ reviewers concurred, flags `needsHumanDecision` when the original commenter walked it back.
+- **Filter transparency.** Clusters dropped by the classifier (low confidence, not promotable, already handled, classify error) are captured with the LLM's reason and listed under `Filtered out` in the digest. Optionally browsable interactively (Next / Skip remaining) — tune thresholds or sanity-check edge cases in team review.
 - **Evidence trail.** Every promoted rule links back to the PR comments it came from — auditable, not vibes.
 - **Stable candidate IDs.** Same pattern keeps the same ID across rescans, so deferred decisions don't get lost on the next run.
 - **Secret redaction.** AWS keys, tokens, JWTs stripped before any LLM call.
+
+<br />
+
+## Cost & mode trade-off
+
+Measured on trpc/trpc, 120-day window, 380 actionable AI comments:
+
+| Mode + provider                        | Candidates | Cost    | Wall time | Output style                                  |
+| -------------------------------------- | ---------- | ------- | --------- | --------------------------------------------- |
+| OpenAI `quick` (gpt-4.1-mini + nano)   | **24**     | $0.07   | 2m 14s    | Narrow, file-specific                         |
+| OpenAI `broad` (gpt-4.1-mini cluster)  | 8          | $0.10   | 2m 39s    | Core conventions only — subset of Anthropic   |
+| **Anthropic `broad` (Haiku 4.5)**      | **21**     | $0.47   | 8m 17s    | **Convention / principle / ADR mix**          |
+
+Picking a mode by cadence:
+
+| Cadence                    | Recommended                                       | Why                                                          |
+| -------------------------- | ------------------------------------------------- | ------------------------------------------------------------ |
+| **Weekly / biweekly**      | OpenAI `quick`                                    | Cheap, fast, catches narrow code patterns as they emerge     |
+| **Monthly**                | Anthropic `broad`                                 | Higher cost but extracts conventions worth memorializing     |
+| **Quarterly / sprint-end** | Anthropic `broad` + optional `--mode quick` follow-up | Combined coverage: principles from broad, code-level from quick |
+
+No Anthropic key? OpenAI `broad` is the "budget" alternative — reliably catches the 6–8 core repo-wide conventions at ~5× lower cost than Anthropic broad, though without the full depth (20+ conventions including ADR-worthy decisions).
+
+Full breakdown with examples from each mode → [docs/clustering.md](docs/clustering.md).
 
 <br />
 
@@ -189,11 +239,11 @@ Full schema, per-provider defaults, env vars, and routing taxonomy → [docs/con
 
 ## Roadmap
 
-**Shipping today** — Personal CLI, multi-tool routing, hybrid clustering, human reply/reaction signal, stable IDs, secret redaction, i18n digest (en / ko / ja).
+**Shipping today** — Personal CLI, multi-tool routing, hybrid clustering, human reply/reaction signal, filter transparency, stable IDs, secret redaction, i18n digest (en / ko / ja).
 
-**Next** — `--create-pr` headless mode + GitHub Action template for weekly digest PRs.
+**Next** — Headless mode for CI/CD: `--create-pr` flag, `--non-interactive` flag for unattended runs, machine-readable output (JSON), and a GitHub Action template for scheduled digest PRs (pick your own cadence).
 
-**Later** — MCP server (use promote from Claude Code / Codex / Copilot directly), eval command for classification accuracy, memory health checks, hosted GitHub App.
+**Later** — eval command for classification accuracy, memory health checks, hosted GitHub App.
 
 <br />
 
