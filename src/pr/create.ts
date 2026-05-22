@@ -1,7 +1,7 @@
 import { execSync, execFileSync } from "node:child_process";
-import { writeFileSync, unlinkSync, mkdtempSync } from "node:fs";
+import { writeFileSync, unlinkSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import type { Octokit } from "octokit";
 import { parseRepoRef } from "../ingest/github-client.js";
 
@@ -21,6 +21,13 @@ export type CreatePullRequestResult = {
   url: string;
   branch: string;
   via: "gh" | "octokit";
+};
+
+export type PrContext = {
+  branch: string;
+  baseBranch: string;
+  originalBranch: string;
+  cwd: string;
 };
 
 export function hasGhCli(): boolean {
@@ -84,16 +91,39 @@ function currentBranch(cwd: string): string {
   return run("git", ["rev-parse", "--abbrev-ref", "HEAD"], cwd);
 }
 
-function gitStage(branch: string, files: string[], cwd: string, baseBranch: string) {
-  // Pull the latest baseBranch from origin so our cut point is current.
+function gitStageFiles(files: string[], cwd: string) {
+  if (files.length === 0) {
+    throw new Error("No files to commit — applyPromotion returned an empty file list.");
+  }
+  run("git", ["add", "--", ...files], cwd);
+}
+
+/**
+ * Switch HEAD to a new branch cut from baseBranch WITHOUT touching the working
+ * tree. The trio update-ref + symbolic-ref + reset --mixed is the key: the
+ * branch ref moves to baseBranch's SHA, HEAD points at the new branch, and the
+ * index resyncs with baseBranch's tree — but any working tree modifications
+ * (applyPromotion's draft writes, the user's other dirt) stay in place.
+ *
+ * Call this BEFORE applyPromotion when --create-pr is on, so the draft writes
+ * land cleanly on top of baseBranch and PR creation can be made atomic
+ * (rolled back if anything downstream fails).
+ */
+export function prepareBranchForPr(input: {
+  branch: string;
+  baseBranch?: string;
+  cwd?: string;
+}): PrContext {
+  const cwd = input.cwd ?? process.cwd();
+  const baseBranch = input.baseBranch ?? detectDefaultBranch(cwd);
+  const originalBranch = currentBranch(cwd);
+
   try {
     run("git", ["fetch", "origin", baseBranch], cwd);
   } catch {
     // offline or no origin/<base> — fall through to the local ref
   }
 
-  // Resolve baseBranch to a SHA. Prefer origin/<base> over the local mirror,
-  // since the local one can be behind.
   let baseSha: string;
   try {
     baseSha = run("git", ["rev-parse", `origin/${baseBranch}`], cwd);
@@ -108,21 +138,92 @@ function gitStage(branch: string, files: string[], cwd: string, baseBranch: stri
     }
   }
 
-  // Create-or-move `branch` to baseSha, then point HEAD at it WITHOUT touching
-  // the working tree. The memory files applyPromotion wrote stay where they
-  // are; they'll appear as a diff against baseSha after `reset --mixed`.
-  // This is the key to "promote branch is cut from main, not from whatever
-  // feature branch the user happens to be on."
-  run("git", ["update-ref", `refs/heads/${branch}`, baseSha], cwd);
-  run("git", ["symbolic-ref", "HEAD", `refs/heads/${branch}`], cwd);
-  // Resync the index with the new HEAD; otherwise stale staging from the
-  // previous branch sneaks into the commit.
+  run("git", ["update-ref", `refs/heads/${input.branch}`, baseSha], cwd);
+  run("git", ["symbolic-ref", "HEAD", `refs/heads/${input.branch}`], cwd);
   run("git", ["reset", "--mixed"], cwd);
 
-  if (files.length === 0) {
-    throw new Error("No files to commit — applyPromotion returned an empty file list.");
+  return { branch: input.branch, baseBranch, originalBranch, cwd };
+}
+
+/**
+ * After applyPromotion has written its files on the prepared branch's working
+ * tree, stage them, commit, push, and open the PR. Does NOT switch branches —
+ * the caller is expected to be on `context.branch` already (from prepareBranchForPr).
+ */
+export async function finalizePr(input: {
+  context: PrContext;
+  title: string;
+  body: string;
+  files: string[];
+  repo: string;
+  labels?: string[];
+  octokit?: Octokit;
+}): Promise<CreatePullRequestResult> {
+  const { context } = input;
+  gitStageFiles(input.files, context.cwd);
+
+  if (!gitHasStagedChanges(context.cwd)) {
+    throw new Error("No staged changes — files were not modified by applyPromotion.");
   }
-  run("git", ["add", "--", ...files], cwd);
+
+  gitCommitAndPush(input.title, context.branch, context.cwd);
+
+  const useGh = hasGhCli() && isGhAuthenticated();
+  if (useGh) {
+    const url = await createWithGh(
+      { ...input, branch: context.branch },
+      context.baseBranch,
+      context.cwd,
+    );
+    return { url, branch: context.branch, via: "gh" };
+  }
+  if (!input.octokit) {
+    throw new Error("gh CLI not available and no Octokit instance was provided for PR creation.");
+  }
+  const url = await createWithOctokit(
+    { ...input, branch: context.branch },
+    context.baseBranch,
+  );
+  return { url, branch: context.branch, via: "octokit" };
+}
+
+/**
+ * Roll back a prepared branch: discard working tree modifications to the files
+ * we wrote (deleting newly-created ones), reset the index, switch back to the
+ * original branch, and delete the promote branch. Best-effort throughout —
+ * never throws.
+ */
+export function rollbackBranch(context: PrContext, files: string[]) {
+  for (const file of files) {
+    const fullPath = resolve(context.cwd, file);
+    try {
+      // Restore from HEAD (= baseBranch) if the file existed there.
+      run("git", ["checkout", "HEAD", "--", file], context.cwd);
+    } catch {
+      // File is new (not in baseBranch). Remove it from working tree.
+      try { rmSync(fullPath, { force: true }); } catch { /* ignore */ }
+    }
+  }
+  try { run("git", ["reset", "--mixed"], context.cwd); } catch { /* ignore */ }
+  try {
+    run("git", ["symbolic-ref", "HEAD", `refs/heads/${context.originalBranch}`], context.cwd);
+  } catch { /* ignore */ }
+  try { run("git", ["branch", "-D", context.branch], context.cwd); } catch { /* ignore */ }
+}
+
+/**
+ * Switch back to the user's original branch after a successful PR creation.
+ * Uses checkout (not symbolic-ref) so the working tree matches the original
+ * branch — the memory file changes are now safely committed on the promote
+ * branch, so it's safe to "lose" them from the working tree.
+ */
+export function restoreOriginalBranch(context: PrContext) {
+  try {
+    run("git", ["checkout", context.originalBranch], context.cwd);
+  } catch {
+    // Best-effort — leave the user on the promote branch if checkout fails
+    // (e.g. uncommitted unrelated dirt that would conflict).
+  }
 }
 
 function gitHasStagedChanges(cwd: string): boolean {
@@ -139,38 +240,33 @@ function gitCommitAndPush(message: string, branch: string, cwd: string) {
   run("git", ["push", "-u", "origin", branch], cwd);
 }
 
+/**
+ * Convenience wrapper for the legacy "apply-then-PR" flow: callers that
+ * already wrote files in the working tree before the branch was switched.
+ * Intentionally does NOT rollback on failure — those file modifications
+ * represent work the user explicitly approved (interactive review), so
+ * destroying them on a PR-creation hiccup would lose user work. The user
+ * is left on the promote branch and can retry / inspect.
+ *
+ * For new code that does its own apply, prefer prepareBranchForPr +
+ * finalizePr — they make atomic rollback opt-in and explicit.
+ */
 export async function createPullRequest(input: CreatePullRequestInput): Promise<CreatePullRequestResult> {
-  const cwd = input.cwd ?? process.cwd();
-  const baseBranch = input.baseBranch ?? detectDefaultBranch(cwd);
-  const originalBranch = currentBranch(cwd);
+  const context = prepareBranchForPr({
+    branch: input.branch,
+    baseBranch: input.baseBranch,
+    cwd: input.cwd,
+  });
 
-  gitStage(input.branch, input.files, cwd, baseBranch);
-
-  if (!gitHasStagedChanges(cwd)) {
-    if (originalBranch !== input.branch) {
-      try { run("git", ["checkout", originalBranch], cwd); } catch { /* ignore */ }
-    }
-    throw new Error("No staged changes — files were not modified by applyPromotion.");
-  }
-
-  gitCommitAndPush(input.title, input.branch, cwd);
-
-  const useGh = hasGhCli() && isGhAuthenticated();
-  let url: string;
-  let via: "gh" | "octokit";
-
-  if (useGh) {
-    url = await createWithGh(input, baseBranch, cwd);
-    via = "gh";
-  } else {
-    if (!input.octokit) {
-      throw new Error("gh CLI not available and no Octokit instance was provided for PR creation.");
-    }
-    url = await createWithOctokit(input, baseBranch);
-    via = "octokit";
-  }
-
-  return { url, branch: input.branch, via };
+  return finalizePr({
+    context,
+    title: input.title,
+    body: input.body,
+    files: input.files,
+    repo: input.repo,
+    labels: input.labels,
+    octokit: input.octokit,
+  });
 }
 
 async function createWithGh(input: CreatePullRequestInput, baseBranch: string, cwd: string): Promise<string> {

@@ -38,7 +38,7 @@ import { notifyIfOutdated } from "../update-check.js";
 import { buildBranchName } from "../../pr/branch.js";
 import { findPullRequestTemplate, buildBundledPrBody, buildBundledPrTitle } from "../../pr/template.js";
 import { fillTemplateWithLlm } from "../../pr/llm-fill.js";
-import { createPullRequest, hasGhCli, isGhAuthenticated } from "../../pr/create.js";
+import { createPullRequest, finalizePr, hasGhCli, isGhAuthenticated, prepareBranchForPr, rollbackBranch, restoreOriginalBranch } from "../../pr/create.js";
 
 const CLOSING_QUOTES: Record<string, string[]> = {
   en: [
@@ -1004,6 +1004,15 @@ async function runHeadlessApplyAndMaybePr(input: HeadlessApplyInput) {
       c.target !== "pr_only",
   );
 
+  // Surface candidates the headless filter dropped so the user knows where
+  // they went. needs_human_decision is the most common "silent skip" cause.
+  const humanGated = input.candidates.filter((c) => c.status === "needs_human_decision");
+  if (humanGated.length > 0) {
+    out.info(
+      `${humanGated.length} candidate(s) flagged needs_human_decision — review locally with 'promote review'.`,
+    );
+  }
+
   out.divider();
   out.stat("Headless eligible", `${eligible.length} / ${input.candidates.length} candidate(s) ≥ ${input.minConfidence}`);
 
@@ -1012,44 +1021,140 @@ async function runHeadlessApplyAndMaybePr(input: HeadlessApplyInput) {
     return;
   }
 
-  const appliedFiles = new Set<string>();
-  const appliedCandidates: Array<PromotionCandidate & { targetFile: string }> = [];
-
-  for (const candidate of eligible) {
-    const target = candidate.target;
-    const result = await applyPromotion(candidate, target, { suppressPrompts: true });
-    if (result.applied) {
-      appliedFiles.add(result.targetFile);
-      appliedCandidates.push({ ...candidate, targetFile: result.targetFile });
-      updateCandidateStatus(input.db, candidate.id, "promoted");
-    }
-  }
-
-  out.stat("Applied", `${appliedCandidates.length} candidate(s)`);
-
+  // Path A: headless apply only (no PR). Status updates happen per-candidate
+  // because the files are written in the user's current branch — there's
+  // no all-or-nothing PR to gate them on.
   if (!input.wantCreatePr) {
+    let appliedCount = 0;
+    for (const candidate of eligible) {
+      const result = await applyPromotion(candidate, candidate.target, { suppressPrompts: true });
+      if (result.applied) {
+        appliedCount++;
+        updateCandidateStatus(input.db, candidate.id, "promoted");
+      }
+    }
+    out.stat("Applied", `${appliedCount} candidate(s)`);
     out.info(`Digest: ${input.digestPath}`);
     out.info("Headless apply complete. Pass --create-pr to also open a PR.");
     return;
   }
 
+  // Path B: atomic --create-pr flow.
+  //   prepareBranchForPr → applyPromotion (writes on the new branch's working
+  //   tree) → finalizePr (commit + push + PR). DB statuses are only flipped
+  //   to 'promoted' AFTER the PR succeeds. Any failure between prepare and
+  //   PR success rolls everything back: working tree restored, promote
+  //   branch deleted, DB untouched.
+  const ghAvailable = hasGhCli() && isGhAuthenticated();
+  if (!ghAvailable && !process.env.GITHUB_TOKEN) {
+    out.error("`gh` CLI not authenticated and GITHUB_TOKEN not set — cannot open a PR.");
+    process.exit(1);
+  }
+
+  const date = new Date();
+  const branchName = buildBranchName({ candidateIds: eligible.map((c) => c.id), date });
+  const ctx = prepareBranchForPr({ branch: branchName, baseBranch: input.baseBranch });
+
+  const appliedFiles = new Set<string>();
+  const appliedCandidates: Array<PromotionCandidate & { targetFile: string }> = [];
+
+  try {
+    for (const candidate of eligible) {
+      const result = await applyPromotion(candidate, candidate.target, { suppressPrompts: true });
+      if (result.applied) {
+        appliedFiles.add(result.targetFile);
+        appliedCandidates.push({ ...candidate, targetFile: result.targetFile });
+      }
+    }
+  } catch (err) {
+    rollbackBranch(ctx, Array.from(appliedFiles));
+    throw err;
+  }
+
+  out.stat("Applied", `${appliedCandidates.length} candidate(s)`);
+
   if (appliedCandidates.length === 0) {
+    rollbackBranch(ctx, []);
     out.info("--create-pr: no candidates were applied — no PR opened.");
     return;
   }
 
-  await openBundledPr({
+  const template = findPullRequestTemplate();
+  const relativeDigestPath = toRelative(input.digestPath);
+
+  let prefilledHeader: string | undefined;
+  if (template) {
+    const fillSpin = out.spinner(`Filling ${template.path} with LLM...`);
+    try {
+      prefilledHeader = await fillTemplateWithLlm({
+        templateBody: template.body,
+        facts: {
+          candidates: appliedCandidates,
+          sinceDays: input.sinceDays,
+          prCount: input.stats.prCount,
+          digestPath: relativeDigestPath,
+        },
+        model: input.draftingModel,
+        costTracker: input.costTracker,
+        outputLanguage: input.config.language.preferredOutput,
+      });
+      fillSpin.succeed(`Filled ${template.path} (LLM)`);
+    } catch (err) {
+      fillSpin.warn(
+        `LLM template fill failed; passing the template through unfilled. (${err instanceof Error ? err.message : String(err)})`,
+      );
+      prefilledHeader = template.body;
+    }
+  }
+
+  const body = buildBundledPrBody({
     candidates: appliedCandidates,
-    files: Array.from(appliedFiles),
+    stats: { prCount: input.stats.prCount },
     sinceDays: input.sinceDays,
-    stats: input.stats,
-    digestPath: input.digestPath,
-    repo: input.repo,
-    baseBranch: input.baseBranch,
-    draftingModel: input.draftingModel,
-    costTracker: input.costTracker,
-    outputLanguage: input.config.language.preferredOutput,
+    date,
+    prefilledHeader,
+    digestPath: relativeDigestPath,
   });
+  const title = buildBundledPrTitle(date, appliedCandidates.length);
+
+  const filesToCommit = [...appliedFiles];
+  if (existsSync(input.digestPath) && !filesToCommit.includes(relativeDigestPath)) {
+    filesToCommit.push(relativeDigestPath);
+  }
+
+  const localRepo = detectLocalRepoSilent();
+  const prRepo = localRepo ?? input.repo;
+  if (localRepo && localRepo !== input.repo) {
+    out.info(`PR target: ${chalk.bold(localRepo)} (scanned repo was ${input.repo}).`);
+  }
+
+  out.divider();
+  const spin = out.spinner(`Opening PR via ${ghAvailable ? "gh" : "octokit"}...`);
+  try {
+    const octokit = ghAvailable ? undefined : createOctokit();
+    const result = await finalizePr({
+      context: ctx,
+      title,
+      body,
+      files: filesToCommit,
+      repo: prRepo,
+      labels: ["memory-promotion"],
+      octokit,
+    });
+    spin.succeed(`PR opened: ${result.url}`);
+
+    // Atomic DB update — only after PR creation succeeded.
+    for (const c of appliedCandidates) {
+      updateCandidateStatus(input.db, c.id, "promoted");
+    }
+    // Best-effort: return the user to their original branch so the working
+    // tree state mirrors what they had before --create-pr ran.
+    restoreOriginalBranch(ctx);
+  } catch (err) {
+    spin.fail("PR creation failed.");
+    rollbackBranch(ctx, filesToCommit);
+    throw err;
+  }
 }
 
 type BundledPrInput = {
