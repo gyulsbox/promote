@@ -38,8 +38,11 @@ Examples:
                                               Scan another repo with custom window
   $ promote scan --mode broad                 LLM-direct clustering for convention-level patterns
   $ promote scan --out path/to/digest.md      Custom digest output path
+  $ promote scan --no-interactive --min-confidence 0.85 --create-pr
+                                              Headless mode (CI/GitHub Actions): auto-apply + open one PR
   $ promote review                            Interactively pick from pending candidates
   $ promote candidate_001 --target agents     Apply a specific candidate
+  $ promote candidate_001 --create-pr         Apply and open a PR for a single candidate
   $ promote snooze candidate_001 --days 14    Defer for 14 days
 
 Common scan options (see 'promote scan --help' for all):
@@ -47,6 +50,9 @@ Common scan options (see 'promote scan --help' for all):
   --since <days>          Time window, e.g. 60d (default: per config)
   --mode <quick|broad>    Clustering mode (default: per config)
   --out <path>            Digest output file path
+  --no-interactive        Disable all prompts (auto for CI / non-TTY)
+  --min-confidence <n>    Confidence floor for auto-apply (0–1)
+  --create-pr             Open one bundled PR after applying
 
 Run 'promote <command> --help' for command-specific options.
 `,
@@ -74,6 +80,20 @@ program
   .option(
     "--mode <mode>",
     "Clustering mode: 'quick' (embedding+HAC, cheap, narrow patterns — requires a provider with embedding API: OpenAI or Google) or 'broad' (LLM-direct, convention-level patterns, more costly — works on any provider). Overrides llm.clusteringStrategy in config.",
+  )
+  .option("--no-interactive", "Disable all prompts. Auto-enabled when CI=true or stdout is not a TTY.")
+  .option(
+    "--min-confidence <number>",
+    "Auto-apply only candidates with confidence ≥ this value (0–1). Defaults to config thresholds.minConfidence.",
+  )
+  .option(
+    "--create-pr",
+    "After applying, open a single bundled PR for all applied candidates. Requires gh auth or GITHUB_TOKEN.",
+  )
+  .option("--base-branch <name>", "PR base branch (default: repo's default branch)")
+  .option(
+    "--allow-foreign-scan",
+    "Allow --repo to point at a different repository than the local working tree. Files are written locally and the PR is opened against the local repo. Useful for testing or upstream-tracking workflows.",
   )
   .option("--verbose", "Verbose output")
   .action(async (options) => {
@@ -104,6 +124,11 @@ program
   .option("--target <target>", "Override routing target (agents, path_scoped_rule, adr, test)")
   .option("--file <path>", "Override target file path")
   .option("--config <path>", "Path to .promote.yml")
+  .option(
+    "--create-pr",
+    "After applying, open a PR for this single candidate. Requires gh auth or GITHUB_TOKEN.",
+  )
+  .option("--base-branch <name>", "PR base branch (default: repo's default branch)")
   .action(async (candidateId, options) => {
     try {
       await runPromote(candidateId, options);

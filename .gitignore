@@ -4,6 +4,8 @@ dist/
 # promote local data
 .promote/
 .promote.yml
+# this repo's own dogfooding digests — end-user repos should commit these
+docs/promote/digests/
 
 # claude code
 .claude/
