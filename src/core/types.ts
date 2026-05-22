@@ -130,6 +130,22 @@ export type PromotionCandidate = {
 
 export type CandidateStatus = PromotionCandidate["status"];
 
+export type SkipReason =
+  | "already-promoted"
+  | "already-ignored"
+  | "not-promotable"
+  | "low-confidence"
+  | "classify-failed";
+
+export type SkippedItem = {
+  summary: string;
+  reason: SkipReason;
+  target?: string;
+  confidence?: number;
+  clusterFingerprint?: string;
+  detail?: string;
+};
+
 export type AnalysisStats = {
   totalComments: number;
   aiComments: number;

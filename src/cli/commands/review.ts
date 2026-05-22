@@ -1,6 +1,6 @@
 import * as p from "@clack/prompts";
 import chalk from "chalk";
-import type { PromotionCandidate } from "../../core/types.js";
+import type { PromotionCandidate, SkippedItem, SkipReason } from "../../core/types.js";
 import { mascotSays } from "../mascot.js";
 
 const TARGET_LABELS: Record<string, string> = {
@@ -10,10 +10,19 @@ const TARGET_LABELS: Record<string, string> = {
   test: "Test (runtime invariant)",
 };
 
+const SKIP_REASON_LABELS: Record<SkipReason, string> = {
+  "already-promoted": "already promoted",
+  "already-ignored": "already ignored",
+  "not-promotable": "not promotable",
+  "low-confidence": "below confidence threshold",
+  "classify-failed": "classify failed",
+};
+
 export type ReviewStats = {
   promoted: number;
   skipped: number;
   ignored: number;
+  userSkippedCandidates: PromotionCandidate[];
 };
 
 /**
@@ -23,8 +32,9 @@ export type ReviewStats = {
 export async function runInteractiveReview(
   candidates: PromotionCandidate[],
   onPromote: (candidate: PromotionCandidate, target: string) => Promise<void>,
+  options?: { includeSkipped?: SkippedItem[] },
 ): Promise<ReviewStats> {
-  const stats: ReviewStats = { promoted: 0, skipped: 0, ignored: 0 };
+  const stats: ReviewStats = { promoted: 0, skipped: 0, ignored: 0, userSkippedCandidates: [] };
 
   console.log();
   mascotSays(`${candidates.length} candidate(s) to review.`);
@@ -91,6 +101,7 @@ export async function runInteractiveReview(
 
       if (p.isCancel(newTarget)) {
         stats.skipped++;
+        stats.userSkippedCandidates.push(c);
         continue;
       }
 
@@ -101,10 +112,76 @@ export async function runInteractiveReview(
       stats.promoted++;
     } else {
       stats.skipped++;
+      stats.userSkippedCandidates.push(c);
+    }
+  }
+
+  if (options?.includeSkipped && options.includeSkipped.length > 0) {
+    const decision = await p.select({
+      message: `Also walk through ${options.includeSkipped.length} skipped item(s)?`,
+      options: [
+        { value: "walk", label: "Walk through them one by one", hint: "see each skipped item with its reason" },
+        { value: "skip-all", label: "Skip all", hint: "go straight to digest decision" },
+      ],
+    });
+    if (!p.isCancel(decision) && decision === "walk") {
+      await walkSkipped(options.includeSkipped);
     }
   }
 
   return stats;
+}
+
+/**
+ * Stand-alone read-only walker for filter-skipped items.
+ * Used when there are zero promotion candidates but skipped items exist.
+ */
+export async function runSkippedReview(items: SkippedItem[]): Promise<void> {
+  console.log();
+  mascotSays(`${items.length} skipped item(s) to walk through.`);
+  console.log();
+  await walkSkipped(items);
+}
+
+async function walkSkipped(items: SkippedItem[]): Promise<void> {
+  console.log();
+  console.log(chalk.bold.dim("  ─── Skipped items ───"));
+  console.log();
+
+  for (let i = 0; i < items.length; i++) {
+    const item = items[i];
+    const num = `${i + 1}/${items.length}`;
+    printSkippedDetails(item, num);
+
+    const action = await p.select({
+      message: "Continue?",
+      options: [
+        { value: "next", label: "Next", hint: "show the next skipped item" },
+        { value: "skip-remaining", label: "Skip remaining", hint: "stop walking, keep the rest unseen" },
+      ],
+    });
+
+    if (p.isCancel(action) || action === "skip-remaining") return;
+  }
+}
+
+function printSkippedDetails(item: SkippedItem, num: string) {
+  console.log();
+  console.log(chalk.bold.dim(`  ─── Skipped ${num} ───`));
+  console.log();
+  console.log(`  ${chalk.bold(item.summary)}`);
+  console.log();
+  console.log(`  ${chalk.dim("Reason")}      ${chalk.yellow(SKIP_REASON_LABELS[item.reason])}`);
+  if (item.target) {
+    console.log(`  ${chalk.dim("Target")}      ${chalk.cyan(item.target)}`);
+  }
+  if (item.confidence !== undefined) {
+    console.log(`  ${chalk.dim("Confidence")}  ${item.confidence}`);
+  }
+  if (item.detail) {
+    console.log(`  ${chalk.dim("Detail")}      ${chalk.dim(item.detail.slice(0, 200))}`);
+  }
+  console.log();
 }
 
 function printCandidateDetails(c: PromotionCandidate, num: string) {
