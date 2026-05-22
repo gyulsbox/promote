@@ -9,7 +9,7 @@ export type HumanReactionSignal = {
   rejectionCount: number;
   plusOneCount: number;
   minusOneCount: number;
-  topRejectExcerpt?: string;
+  firstRejectExcerpt?: string;
 };
 
 export type RawReviewComment = {
@@ -136,8 +136,8 @@ export type AnalysisStats = {
   candidatesGenerated: number;
   failedClusters: number;
   prCount: number;
-  embeddingTokens: number;
-  classificationTokens: number;
+  promptTokens: number;
+  completionTokens: number;
   estimatedCostUSD: number;
 };
 

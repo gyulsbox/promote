@@ -5,6 +5,7 @@ import type { CostTracker } from "../llm/cost-tracker.js";
 import { greedyCluster } from "./greedy-cluster.js";
 import { hacCluster } from "./hac-cluster.js";
 import { llmCluster } from "./llm-cluster.js";
+import { llmRefine } from "./llm-refine.js";
 
 function l2norm(v: number[]): number {
   let sum = 0;
@@ -82,10 +83,22 @@ export async function preCluster(input: PreClusterInput): Promise<PreClusterOutp
 
   onProgress?.("Clustering...");
   // HAC for N ≤ 500 (O(N²) is acceptable); greedy fallback for larger inputs
-  const clusters =
+  let clusters =
     sortedComments.length <= 500
       ? hacCluster(sortedComments, sortedEmbeddings, input.similarityThreshold)
       : greedyCluster(sortedComments, sortedEmbeddings, input.similarityThreshold);
+
+  // LLMEdgeRefine (EMNLP 2024): merge borderline pairs (similarity within threshold ± 0.05)
+  // via LLM yes/no. Only runs when we have ≥ 2 clusters with embeddings (HAC path).
+  if (clusters.length >= 2 && sortedComments.length <= 500) {
+    onProgress?.("Refining borderline clusters...");
+    clusters = await llmRefine({
+      clusters,
+      threshold: input.similarityThreshold,
+      model: classificationModel,
+      costTracker,
+    });
+  }
 
   return { clusters, allClusters: clusters.length, mode: "embedding" };
 }

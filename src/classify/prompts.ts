@@ -77,7 +77,7 @@ export function buildClassificationPrompt(input: {
     if (s.minusOneCount > 0) parts.push(`👎 ${s.minusOneCount}`);
     if (parts.length === 0) return "";
     let section = `\nHuman reviewer reactions: ${parts.join(", ")}.`;
-    if (s.topRejectExcerpt) section += `\nDismissal context: "${s.topRejectExcerpt}"`;
+    if (s.firstRejectExcerpt) section += `\nDismissal context: "${s.firstRejectExcerpt}"`;
     return section;
   })();
 

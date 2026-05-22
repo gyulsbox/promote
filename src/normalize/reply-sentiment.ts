@@ -15,11 +15,13 @@ const AGREE_PATTERNS = [
   /^\s*\+1\s*$/,
   /\bagree\b/i,
   /\bcorrect\b/i,
-  /맞/,
+  // Korean: avoid bare /맞/ and /수정/ since they match too broadly (맞춤형, 수정 필요 등).
+  /맞(아|다|네|음|어요|어|네요)/,
   /동의/,
-  /수정/,
+  /수정(했|완료|함|됨|되었)/,
   /감사/,
   /완료/,
+  // Japanese
   /了解/,
 ];
 
@@ -32,7 +34,8 @@ const REJECT_PATTERNS = [
   /\bspecial[\s-]case\b/i,
   /\bthis\s+is\s+(expected|intentional)\b/i,
   /특수\s*케이스/,
-  /예외/,
+  // Korean: /예외(?!처리)/ avoids false positives like "예외처리가 필요" (= needs exception handling).
+  /예외(?!처리)/,
   /의도적/,
   /설계상/,
   /意図的/,

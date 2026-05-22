@@ -240,7 +240,7 @@ promote --help
 
 ## Configuration
 
-`.promote.yml` is created by `promote init`:
+`.promote.yml` is created by `promote init`. The example below is the output when **Claude Code** is the chosen AI tool and **Anthropic** is the detected provider — paths and model names vary per tool/provider:
 
 ```yaml
 version: 1
@@ -251,11 +251,15 @@ language:
 memoryTargets:
   agents:
     preferredFiles:
-      - CLAUDE.md
+      - CLAUDE.md        # AGENTS.md for Codex, GEMINI.md for Gemini, etc.
   pathScoped:
     preferredDir: .claude/rules
   adr:
     dir: docs/adr
+
+# aiReviewers:           # bot logins to include — defaults to a curated list
+#   - github-copilot[bot] #   (Copilot, CodeRabbit, Greptile, Cursor, Sourcery, Devin, Qodo, ...)
+#   - coderabbitai[bot]
 
 thresholds:
   minOccurrences: 3
@@ -264,14 +268,17 @@ thresholds:
   minConfidence: 0.75
 
 llm:
-  provider: anthropic
+  provider: anthropic    # openai | anthropic | google — auto-picked from detected env keys
   classificationModel: claude-sonnet-4-5
   draftingModel: claude-haiku-4-5
+  embeddingModel: text-embedding-3-small   # ignored when provider=anthropic (LLM-only clustering)
 
 privacy:
   redactSecrets: true        # redact AWS keys, tokens, JWTs before sending to LLM
   sendDiffHunksToLLM: false  # send code diff context with each comment (improves accuracy, sends code)
 ```
+
+> Without a `.promote.yml`, the schema falls back to `provider: openai` with `gpt-4.1-mini` for classification + drafting. Run `promote init` to get a per-tool/per-provider config.
 
 <br />
 
@@ -283,7 +290,7 @@ privacy:
 - [x] `promote <id>` — apply a specific candidate with confirm prompt
 - [x] Multi-tool support (Claude, Codex, Copilot, Cursor, Windsurf, Gemini)
 - [x] Multi-provider BYOK (OpenAI, Anthropic, Google)
-- [x] i18n output (English, Korean, Japanese)
+- [x] i18n output (English, Korean, Japanese) — digest + scan summary; interactive review prompts remain English-only
 - [x] Cross-run dedup + stable candidate IDs (same pattern reuses ID across scans)
 - [x] Human reply/reaction signal — agree/dismiss replies and 👍/👎 inform classification
 - [x] Secret redaction — AWS keys, tokens, JWTs stripped before LLM calls

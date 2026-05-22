@@ -129,13 +129,19 @@ export async function runReview(options: { config?: string }) {
     repo = "";
   }
 
-  const allRows = repo ? listCandidates(db, repo) : [];
+  if (!repo) {
+    out.error("No GitHub remote detected on the current directory.");
+    out.info("Run 'promote review' inside a cloned GitHub repo, or 'promote <candidateId>' to target a known ID directly.");
+    return;
+  }
+
+  const allRows = listCandidates(db, repo);
   const rows = allRows.filter(
     (r) => r.status === "candidate" || r.status === "needs_human_decision",
   );
 
   if (rows.length === 0) {
-    mascotSays("No pending candidates. Run 'promote scan' first.");
+    mascotSays(`No pending candidates in ${repo}. Run 'promote scan' first.`);
     return;
   }
 

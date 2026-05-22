@@ -140,8 +140,8 @@ function printCandidateDetails(c: PromotionCandidate, num: string) {
       if (s.plusOneCount > 0) parts.push(`👍 ${s.plusOneCount}`);
       if (s.minusOneCount > 0) parts.push(`👎 ${s.minusOneCount}`);
       console.log(`  ${chalk.dim("Human signal")} ${parts.join(" · ")}`);
-      if (s.topRejectExcerpt) {
-        console.log(`  ${chalk.dim("Dismissal")}   ${chalk.yellow(`"${s.topRejectExcerpt}"`)}`);
+      if (s.firstRejectExcerpt) {
+        console.log(`  ${chalk.dim("Dismissal")}   ${chalk.yellow(`"${s.firstRejectExcerpt}"`)}`);
       }
     }
   }

@@ -26,7 +26,8 @@ import {
   updateCandidateStatus,
 } from "../../storage/repositories.js";
 import { buildReplyContextMap } from "../../ingest/reply-context.js";
-import type { PromotionCandidate, AnalysisStats, HumanReactionSignal, Cluster } from "../../core/types.js";
+import { aggregateHumanSignal } from "../../core/human-signal.js";
+import type { PromotionCandidate, AnalysisStats } from "../../core/types.js";
 import * as out from "../output.js";
 import { mascotSays, mascotHappy } from "../mascot.js";
 import { createTimedSpinner, getClassifyMessage, getDraftMessage, getClusterMessage } from "../thinking.js";
@@ -194,6 +195,7 @@ export async function runScan(options: ScanOptions) {
   const CONCURRENCY = 3;
   const total = repeatedClusters.length;
   const candidates: PromotionCandidate[] = [];
+  let failedClusters = 0;
 
   type ClusterResult = {
     index: number;
@@ -247,74 +249,86 @@ export async function runScan(options: ScanOptions) {
       return;
     }
 
-    const humanSignal = aggregateHumanSignal(cluster, replyContextMap);
+    try {
+      const humanSignal = aggregateHumanSignal(cluster, replyContextMap);
 
-    const decision = await classifyCluster({
-      cluster,
-      model: models.classificationModel,
-      memoryContext,
-      costTracker,
-      outputLanguage: config.language.preferredOutput,
-      redact: config.privacy.redactSecrets,
-      humanSignal,
-      includeDiffHunks: config.privacy.sendDiffHunksToLLM,
-    });
+      const decision = await classifyCluster({
+        cluster,
+        model: models.classificationModel,
+        memoryContext,
+        costTracker,
+        outputLanguage: config.language.preferredOutput,
+        redact: config.privacy.redactSecrets,
+        humanSignal,
+        includeDiffHunks: config.privacy.sendDiffHunksToLLM,
+      });
 
-    if (!decision.clusterValid || decision.target === "none" || decision.target === "pr_only") {
-      resultBuffer[index] = { index, candidate: null, summary: decision.summary ?? "not promotable", skipped: true };
-      flushBuffer();
-      return;
-    }
+      if (!decision.clusterValid || decision.target === "none" || decision.target === "pr_only") {
+        resultBuffer[index] = { index, candidate: null, summary: decision.summary ?? "not promotable", skipped: true };
+        flushBuffer();
+        return;
+      }
 
-    if (decision.confidence < config.thresholds.minConfidence) {
-      resultBuffer[index] = { index, candidate: null, summary: decision.summary ?? "", skipped: true };
-      flushBuffer();
-      return;
-    }
+      if (decision.confidence < config.thresholds.minConfidence) {
+        resultBuffer[index] = { index, candidate: null, summary: decision.summary ?? "", skipped: true };
+        flushBuffer();
+        return;
+      }
 
-    const draft = await generateDraft({
-      cluster,
-      decision,
-      model: models.draftingModel,
-      costTracker,
-      preferredLanguage: config.language.preferredOutput,
-      redact: config.privacy.redactSecrets,
-    });
+      const draft = await generateDraft({
+        cluster,
+        decision,
+        model: models.draftingModel,
+        costTracker,
+        preferredLanguage: config.language.preferredOutput,
+        redact: config.privacy.redactSecrets,
+      });
 
-    const candidateId = preAssignedIds.get(cluster.fingerprint) ?? `candidate_${String(nextNewNum++).padStart(3, "0")}`;
+      const candidateId = preAssignedIds.get(cluster.fingerprint) ?? `candidate_${String(nextNewNum++).padStart(3, "0")}`;
 
-    resultBuffer[index] = {
-      index,
-      candidate: {
-        id: candidateId,
-        repo: repo.fullName,
-        clusterId: cluster.id,
-        clusterFingerprint: cluster.fingerprint,
+      resultBuffer[index] = {
+        index,
+        candidate: {
+          id: candidateId,
+          repo: repo.fullName,
+          clusterId: cluster.id,
+          clusterFingerprint: cluster.fingerprint,
+          summary: decision.summary,
+          target: decision.target,
+          confidence: decision.confidence,
+          suggestedFile: decision.suggestedFile ?? draft.targetFile,
+          pathScope: decision.pathScope,
+          draft,
+          reasoning: decision.reason,
+          alternatives: decision.alternatives,
+          occurrences: cluster.members.map((m) => ({
+            prNumber: m.prNumber,
+            path: m.filePath,
+            url: m.htmlUrl,
+            excerpt: m.normalizedBody.slice(0, 150),
+            authorLogin: m.authorLogin,
+            createdAt: m.createdAt,
+          })),
+          status: decision.needsHumanDecision ? "needs_human_decision" as const : "candidate" as const,
+          humanSignal,
+        },
         summary: decision.summary,
+        skipped: false,
         target: decision.target,
         confidence: decision.confidence,
-        suggestedFile: decision.suggestedFile ?? draft.targetFile,
-        pathScope: decision.pathScope,
-        draft,
-        reasoning: decision.reason,
-        alternatives: decision.alternatives,
-        occurrences: cluster.members.map((m) => ({
-          prNumber: m.prNumber,
-          path: m.filePath,
-          url: m.htmlUrl,
-          excerpt: m.normalizedBody.slice(0, 150),
-          authorLogin: m.authorLogin,
-          createdAt: m.createdAt,
-        })),
-        status: decision.needsHumanDecision ? "needs_human_decision" as const : "candidate" as const,
-        humanSignal,
-      },
-      summary: decision.summary,
-      skipped: false,
-      target: decision.target,
-      confidence: decision.confidence,
-    };
-    flushBuffer();
+      };
+      flushBuffer();
+    } catch (err) {
+      failedClusters++;
+      const msg = err instanceof Error ? err.message : String(err);
+      resultBuffer[index] = {
+        index,
+        candidate: null,
+        summary: `failed: ${msg.slice(0, 80)}`,
+        skipped: true,
+      };
+      flushBuffer();
+    }
   };
 
   // Run with concurrency limit
@@ -349,6 +363,10 @@ export async function runScan(options: ScanOptions) {
 
   activeTimer.stop();
   activeSpinner.stop();
+
+  if (failedClusters > 0) {
+    out.warn(`${failedClusters} cluster(s) failed during classify/draft and were skipped — see summary line above.`);
+  }
 
   // Persist clusters + candidates to DB for cross-run dedup
   // Clusters must be inserted first (candidates FK → clusters)
@@ -408,10 +426,10 @@ export async function runScan(options: ScanOptions) {
     clustersFound: clusters.length,
     repeatedClusters: repeatedClusters.length,
     candidatesGenerated: candidates.length,
-    failedClusters: 0,
+    failedClusters,
     prCount: uniquePrs.size,
-    embeddingTokens: cost.totalPromptTokens,
-    classificationTokens: cost.totalCompletionTokens,
+    promptTokens: cost.totalPromptTokens,
+    completionTokens: cost.totalCompletionTokens,
     estimatedCostUSD: cost.estimatedCostUSD,
   };
 
@@ -555,28 +573,6 @@ function parseSinceDays(since: string): number {
   if (!Number.isNaN(num) && num > 0) return num;
 
   throw new Error(`Invalid --since value: "${since}". Use format like "60d" or "60".`);
-}
-
-function aggregateHumanSignal(
-  cluster: Cluster,
-  replyContextMap: Awaited<ReturnType<typeof buildReplyContextMap>>,
-): HumanReactionSignal {
-  let agree = 0, reject = 0, plusOne = 0, minusOne = 0;
-  let topRejectExcerpt: string | undefined;
-  for (const m of cluster.members) {
-    const ctx = replyContextMap.get(m.id);
-    if (!ctx) continue;
-    for (const r of ctx.replies) {
-      if (r.sentiment === "agree") agree++;
-      if (r.sentiment === "reject") {
-        reject++;
-        if (!topRejectExcerpt) topRejectExcerpt = r.body.slice(0, 120);
-      }
-    }
-    plusOne += ctx.reactions.plusOne;
-    minusOne += ctx.reactions.minusOne;
-  }
-  return { agreementCount: agree, rejectionCount: reject, plusOneCount: plusOne, minusOneCount: minusOne, topRejectExcerpt };
 }
 
 function truncate(text: string, max: number): string {

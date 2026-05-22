@@ -13,6 +13,9 @@ const promoteConfigSchema = z.object({
     })
     .default({ preferredOutput: "en" }),
 
+  // Defaults include multiple aliases per bot vendor (e.g. github-copilot[bot] vs copilot[bot],
+  // coderabbitai[bot] vs coderabbit-openai[bot], qodo-merge-pro[bot] vs qodo-merge-pro-for-open-source[bot]).
+  // GitHub has historically renamed bot accounts; keeping both forms here is defensive.
   aiReviewers: z
     .array(z.string())
     .default([

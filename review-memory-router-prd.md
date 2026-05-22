@@ -1114,7 +1114,7 @@ type HumanReactionSignal = {
   rejectionCount: number
   plusOneCount: number
   minusOneCount: number
-  topRejectExcerpt?: string  // first dismissal reply body, ≤ 120 chars
+  firstRejectExcerpt?: string  // first dismissal reply body, ≤ 120 chars
 }
 ```
 
@@ -2950,7 +2950,7 @@ type PromotionCandidate = {
     rejectionCount: number
     plusOneCount: number
     minusOneCount: number
-    topRejectExcerpt?: string
+    firstRejectExcerpt?: string
   }
 }
 ```

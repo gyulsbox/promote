@@ -242,7 +242,7 @@ export type HumanReactionSignal = {
   rejectionCount: number;
   plusOneCount: number;
   minusOneCount: number;
-  topRejectExcerpt?: string;
+  firstRejectExcerpt?: string;
 };
 
 // RawReviewComment additions
@@ -332,7 +332,7 @@ Rejection is forced to need human review *even when* the LLM is confident — hu
   Dismissal     "이건 특수케이스입니다"
 ```
 
-Only renders when at least one of the four counts is non-zero. `topRejectExcerpt` capped at 120 chars.
+Only renders when at least one of the four counts is non-zero. `firstRejectExcerpt` capped at 120 chars.
 
 ### D-9. Persistence
 **Files**: `src/storage/schema.ts`, `src/storage/db.ts`, `src/storage/repositories.ts`
@@ -398,7 +398,9 @@ Default off — the config flag exists to make this opt-in for users who care ab
 
 ---
 
-## 6. Default config (`init` output)
+## 6. Default config (`init` output, Claude Code + Anthropic preset)
+
+`promote init` writes a per-tool/per-provider config. The example below is the output when Claude Code is selected as the AI tool and the Anthropic API key is the detected provider. The schema *fallback* (when no `.promote.yml` exists at all) is `provider: openai` with `gpt-4.1-mini` — see `src/core/config.ts:74-79`.
 
 ```yaml
 version: 1
@@ -422,9 +424,10 @@ thresholds:
   minConfidence: 0.75
 
 llm:
-  provider: anthropic
+  provider: anthropic         # auto-picked from detected env keys
   classificationModel: claude-sonnet-4-5
   draftingModel: claude-haiku-4-5
+  embeddingModel: text-embedding-3-small   # ignored when provider=anthropic
 
 privacy:
   redactSecrets: true         # new
@@ -476,25 +479,30 @@ privacy:
 ```bash
 pnpm exec tsc --noEmit    # 0 errors
 pnpm build                # 113 KB ESM, clean
+pnpm test                 # vitest — see src/normalize/reply-sentiment.test.ts
 ```
 
-`classifyReplySentiment` smoke test (12 cases, en/ko/ja):
+`classifyReplySentiment` is covered by a vitest spec at `src/normalize/reply-sentiment.test.ts` — 12 baseline cases (en/ko/ja) plus 4 Korean narrowing-regression cases (`수정 필요`, `수정했어요`, `예외처리가 필요`, `예외 케이스입니다`):
 
 ```
-✓ "lgtm"                    → agree
-✓ "good catch, will fix"    → agree
-✓ "fixed!"                  → agree
-✓ "동의합니다"               → agree
-✓ "완료했습니다"             → agree
-✓ "+1"                      → agree
-✓ "this is intentional"     → reject
-✓ "by design, won't fix"    → reject
-✓ "특수케이스입니다"          → reject
-✓ "의도적으로 작성됨"         → reject
-✓ "can you explain more?"   → neutral
-✓ "what about the edge case?" → neutral
+✓ agree: "lgtm"
+✓ agree: "good catch, will fix"
+✓ agree: "fixed!"
+✓ agree: "동의합니다"
+✓ agree: "완료했습니다"
+✓ agree: "+1"
+✓ reject: "this is intentional"
+✓ reject: "by design, won't fix"
+✓ reject: "특수케이스입니다"
+✓ reject: "의도적으로 작성됨"
+✓ neutral: "can you explain more?"
+✓ neutral: "what about the edge case?"
+✓ neutral: "이 부분 수정 필요해요"
+✓ agree:   "수정했어요"
+✓ neutral: "이 경우 예외처리가 필요해 보입니다"
+✓ reject:  "이건 예외 케이스입니다"
 
-12/12 passed
+16/16 passed
 ```
 
 ---

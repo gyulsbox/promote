@@ -119,7 +119,7 @@ export function renderDigest(
         if (s.rejectionCount > 0) lines.push(`- Dismissed: **${s.rejectionCount}** reviewer(s) (e.g. "by design", "special case")`);
         if (s.plusOneCount > 0) lines.push(`- 👍 ${s.plusOneCount}`);
         if (s.minusOneCount > 0) lines.push(`- 👎 ${s.minusOneCount}`);
-        if (s.topRejectExcerpt) lines.push(`- Dismissal context: *"${s.topRejectExcerpt}"*`);
+        if (s.firstRejectExcerpt) lines.push(`- Dismissal context: *"${s.firstRejectExcerpt}"*`);
         lines.push("");
       }
     }

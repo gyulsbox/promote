@@ -1,13 +1,10 @@
-import { createHash } from "node:crypto";
 import type { Octokit } from "octokit";
 import type {
   RepoRef,
   PromoteConfig,
   PromotionCandidate,
   AnalysisStats,
-  Cluster,
   AnalyzeReviewMemoryOutput,
-  HumanReactionSignal,
 } from "./types.js";
 import type { ResolvedModels } from "../llm/provider.js";
 import type { CostTracker } from "../llm/cost-tracker.js";
@@ -19,7 +16,8 @@ import { preCluster } from "../cluster/pre-cluster.js";
 import { scanExistingMemory } from "../memory/memory-scanner.js";
 import { classifyCluster } from "../classify/route-classifier.js";
 import { generateDraft } from "../draft/draft-generator.js";
-import { buildReplyContextMap, type BotCommentContext } from "../ingest/reply-context.js";
+import { buildReplyContextMap } from "../ingest/reply-context.js";
+import { aggregateHumanSignal } from "./human-signal.js";
 
 export type EngineCallbacks = {
   onProgress?: (step: string, detail?: string) => void;
@@ -165,37 +163,10 @@ export async function analyzeReviewMemory(input: {
     candidatesGenerated: candidates.length,
     failedClusters,
     prCount: uniquePrs.size,
-    embeddingTokens: cost.totalPromptTokens,
-    classificationTokens: cost.totalCompletionTokens,
+    promptTokens: cost.totalPromptTokens,
+    completionTokens: cost.totalCompletionTokens,
     estimatedCostUSD: cost.estimatedCostUSD,
   };
 
   return { candidates, stats };
-}
-
-function aggregateHumanSignal(
-  cluster: Cluster,
-  replyContextMap: Map<string, BotCommentContext>,
-): HumanReactionSignal {
-  let agree = 0;
-  let reject = 0;
-  let plusOne = 0;
-  let minusOne = 0;
-  let topRejectExcerpt: string | undefined;
-
-  for (const m of cluster.members) {
-    const ctx = replyContextMap.get(m.id);
-    if (!ctx) continue;
-    for (const r of ctx.replies) {
-      if (r.sentiment === "agree") agree++;
-      if (r.sentiment === "reject") {
-        reject++;
-        if (!topRejectExcerpt) topRejectExcerpt = r.body.slice(0, 120);
-      }
-    }
-    plusOne += ctx.reactions.plusOne;
-    minusOne += ctx.reactions.minusOne;
-  }
-
-  return { agreementCount: agree, rejectionCount: reject, plusOneCount: plusOne, minusOneCount: minusOne, topRejectExcerpt };
 }
