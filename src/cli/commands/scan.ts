@@ -32,9 +32,13 @@ import * as out from "../output.js";
 import { mascotSays, mascotHappy } from "../mascot.js";
 import { createTimedSpinner, getClassifyMessage, getDraftMessage, getClusterMessage } from "../thinking.js";
 import { runInteractiveReview, runSkippedReview } from "./review.js";
-import { applyPromotion } from "./promote.js";
+import { applyPromotion, resolveTargetFile } from "./promote.js";
 import { NAME, VERSION } from "../../version.js";
 import { notifyIfOutdated } from "../update-check.js";
+import { buildBranchName } from "../../pr/branch.js";
+import { findPullRequestTemplate, buildBundledPrBody, buildBundledPrTitle } from "../../pr/template.js";
+import { fillTemplateWithLlm } from "../../pr/llm-fill.js";
+import { createPullRequest, hasGhCli, isGhAuthenticated } from "../../pr/create.js";
 
 const CLOSING_QUOTES: Record<string, string[]> = {
   en: [
@@ -58,7 +62,29 @@ export type ScanOptions = {
   out?: string;
   mode?: string;
   verbose?: boolean;
+  // Commander maps `--no-interactive` to `options.interactive = false`.
+  interactive?: boolean;
+  minConfidence?: string;
+  createPr?: boolean;
+  baseBranch?: string;
+  allowForeignScan?: boolean;
 };
+
+function detectHeadless(options: ScanOptions): boolean {
+  if (options.interactive === false) return true;
+  if (process.env.CI === "true") return true;
+  if (!process.stdout.isTTY) return true;
+  return false;
+}
+
+function parseMinConfidence(raw: string | undefined, fallback: number): number {
+  if (raw === undefined) return fallback;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n < 0 || n > 1) {
+    throw new Error(`--min-confidence must be a number between 0 and 1 (got "${raw}").`);
+  }
+  return n;
+}
 
 export async function runScan(options: ScanOptions) {
   const runStartedAt = Date.now();
@@ -75,6 +101,17 @@ export async function runScan(options: ScanOptions) {
 
   await notifyIfOutdated();
   const config = loadConfig(options.config);
+  const headless = detectHeadless(options);
+  const minConfidence = parseMinConfidence(options.minConfidence, config.thresholds.minConfidence);
+  const wantCreatePr = options.createPr === true;
+
+  if (wantCreatePr) {
+    const ghOk = hasGhCli() && isGhAuthenticated();
+    if (!ghOk && !process.env.GITHUB_TOKEN) {
+      out.error("--create-pr requires `gh auth login` or GITHUB_TOKEN set in the environment.");
+      process.exit(1);
+    }
+  }
 
   // --mode overrides clusteringStrategy at runtime
   if (options.mode) {
@@ -111,6 +148,11 @@ export async function runScan(options: ScanOptions) {
     out.warn(
       `Provider 'anthropic' has no embedding API — 'quick' mode (embedding+HAC) is not supported there.`,
     );
+
+    if (headless) {
+      out.error("Set llm.clusteringStrategy: llm-direct (or --mode broad), or switch to OpenAI/Google.");
+      process.exit(1);
+    }
 
     const hasOpenAiKey = !!process.env.OPENAI_API_KEY;
     const choice = await p.select({
@@ -671,7 +713,7 @@ export async function runScan(options: ScanOptions) {
     timings,
   };
 
-  const digestDir = resolve(process.cwd(), ".promote", "digests");
+  const digestDir = resolve(process.cwd(), "docs", "promote", "digests");
   if (!existsSync(digestDir)) {
     mkdirSync(digestDir, { recursive: true });
   }
@@ -691,25 +733,31 @@ export async function runScan(options: ScanOptions) {
     );
     console.log();
 
-    const viewSkipped = await p.confirm({
-      message: `View ${filterSkipped.length} filtered item(s) now?`,
-      initialValue: true,
-    });
-    if (p.isCancel(viewSkipped)) {
-      out.info("Cancelled.");
-      process.exit(130);
-    }
-    if (viewSkipped) {
-      await runSkippedReview(filterSkipped);
+    if (!headless) {
+      const viewSkipped = await p.confirm({
+        message: `View ${filterSkipped.length} filtered item(s) now?`,
+        initialValue: true,
+      });
+      if (p.isCancel(viewSkipped)) {
+        out.info("Cancelled.");
+        process.exit(130);
+      }
+      if (viewSkipped) {
+        await runSkippedReview(filterSkipped);
+      }
     }
 
-    const saveDigest = await p.confirm({
-      message: "Save skip digest?",
-      initialValue: true,
-    });
-    if (p.isCancel(saveDigest)) {
-      out.info("Cancelled.");
-      process.exit(130);
+    let saveDigest = true;
+    if (!headless) {
+      const answer = await p.confirm({
+        message: "Save skip digest?",
+        initialValue: true,
+      });
+      if (p.isCancel(answer)) {
+        out.info("Cancelled.");
+        process.exit(130);
+      }
+      saveDigest = answer;
     }
     if (saveDigest) {
       const digest = renderDigest(
@@ -772,23 +820,54 @@ export async function runScan(options: ScanOptions) {
   const isLocalRepo = checkIsLocalRepo(repo.fullName);
 
   if (!isLocalRepo) {
-    const remoteAction = await p.select({
-      message: `You scanned ${chalk.bold(repo.fullName)} but this isn't your local repo. Promoting here would write files to your current directory.`,
-      options: [
-        { value: "digest-only", label: "Keep digest only (recommended)", hint: "review and promote in the target repo" },
-        { value: "review", label: "Review anyway", hint: "files will be written to current directory" },
-      ],
-    });
-
-    if (p.isCancel(remoteAction)) {
-      out.info("Cancelled.");
-      process.exit(130);
-    }
-    if (remoteAction === "digest-only") {
-      out.info(`Digest saved: ${chalk.bold(digestPath)}`);
-      out.info("Clone the target repo and run promote there to apply changes.");
+    if (options.allowForeignScan) {
+      out.warn(
+        `Foreign scan: ${chalk.bold(repo.fullName)} ≠ local origin. Files will be written here and any PR will target the local repo.`,
+      );
+    } else if (headless) {
+      out.error(
+        `Scanned ${repo.fullName} but current directory is a different repo. Headless mode cannot apply changes or open a PR.`,
+      );
+      out.info(`Digest saved: ${digestPath}`);
+      out.info(`Pass --allow-foreign-scan to apply files locally and PR against the local repo anyway.`);
       return;
+    } else {
+      const remoteAction = await p.select({
+        message: `You scanned ${chalk.bold(repo.fullName)} but this isn't your local repo. Promoting here would write files to your current directory.`,
+        options: [
+          { value: "digest-only", label: "Keep digest only (recommended)", hint: "review and promote in the target repo" },
+          { value: "review", label: "Review anyway", hint: "files will be written to current directory" },
+        ],
+      });
+
+      if (p.isCancel(remoteAction)) {
+        out.info("Cancelled.");
+        process.exit(130);
+      }
+      if (remoteAction === "digest-only") {
+        out.info(`Digest saved: ${chalk.bold(digestPath)}`);
+        out.info("Clone the target repo and run promote there to apply changes.");
+        return;
+      }
     }
+  }
+
+  if (headless) {
+    await runHeadlessApplyAndMaybePr({
+      candidates,
+      minConfidence,
+      wantCreatePr,
+      repo: repo.fullName,
+      sinceDays,
+      digestPath,
+      baseBranch: options.baseBranch,
+      stats,
+      config,
+      db,
+      draftingModel: models.draftingModel,
+      costTracker,
+    });
+    return;
   }
 
   const reviewNow = await p.select({
@@ -812,11 +891,17 @@ export async function runScan(options: ScanOptions) {
   // Interactive review — each approval writes immediately.
   // If filter-skipped exists, runInteractiveReview will ask after candidates
   // whether to walk through them too.
+  const appliedFiles = new Set<string>();
+  const appliedCandidates: Array<PromotionCandidate & { targetFile: string }> = [];
   const { promoted, skipped, userSkippedCandidates } = await runInteractiveReview(
     candidates,
     async (candidate, target) => {
-      await applyPromotion(candidate, target);
-      updateCandidateStatus(db, candidate.id, "promoted");
+      const result = await applyPromotion(candidate, target);
+      if (result.applied) {
+        appliedFiles.add(result.targetFile);
+        appliedCandidates.push({ ...candidate, targetFile: result.targetFile });
+        updateCandidateStatus(db, candidate.id, "promoted");
+      }
     },
     filterSkipped.length > 0 ? { includeSkipped: filterSkipped } : undefined,
   );
@@ -851,6 +936,23 @@ export async function runScan(options: ScanOptions) {
     }
   }
 
+  if (wantCreatePr && appliedCandidates.length > 0) {
+    await openBundledPr({
+      candidates: appliedCandidates,
+      files: Array.from(appliedFiles),
+      sinceDays,
+      stats,
+      digestPath,
+      repo: repo.fullName,
+      baseBranch: options.baseBranch,
+      draftingModel: models.draftingModel,
+      costTracker,
+      outputLanguage: config.language.preferredOutput,
+    });
+  } else if (wantCreatePr && appliedCandidates.length === 0) {
+    out.info("--create-pr: no candidates were applied — no PR opened.");
+  }
+
   if (promoted > 0) {
     out.divider();
     const quote = CLOSING_QUOTES[config.language.preferredOutput] ?? CLOSING_QUOTES.en;
@@ -876,6 +978,186 @@ function checkIsLocalRepo(scannedRepo: string): boolean {
   } catch {
     return false;
   }
+}
+
+type HeadlessApplyInput = {
+  candidates: PromotionCandidate[];
+  minConfidence: number;
+  wantCreatePr: boolean;
+  repo: string;
+  sinceDays: number;
+  digestPath: string;
+  baseBranch?: string;
+  stats: AnalysisStats;
+  config: ReturnType<typeof loadConfig>;
+  db: ReturnType<typeof initDatabase>["db"];
+  draftingModel: ReturnType<typeof resolveModels>["draftingModel"];
+  costTracker: CostTracker;
+};
+
+async function runHeadlessApplyAndMaybePr(input: HeadlessApplyInput) {
+  const eligible = input.candidates.filter(
+    (c) =>
+      c.status === "candidate" &&
+      c.confidence >= input.minConfidence &&
+      c.target !== "none" &&
+      c.target !== "pr_only",
+  );
+
+  out.divider();
+  out.stat("Headless eligible", `${eligible.length} / ${input.candidates.length} candidate(s) ≥ ${input.minConfidence}`);
+
+  if (eligible.length === 0) {
+    out.info("No candidates met the auto-apply criteria. Digest saved; nothing applied.");
+    return;
+  }
+
+  const appliedFiles = new Set<string>();
+  const appliedCandidates: Array<PromotionCandidate & { targetFile: string }> = [];
+
+  for (const candidate of eligible) {
+    const target = candidate.target;
+    const result = await applyPromotion(candidate, target, { suppressPrompts: true });
+    if (result.applied) {
+      appliedFiles.add(result.targetFile);
+      appliedCandidates.push({ ...candidate, targetFile: result.targetFile });
+      updateCandidateStatus(input.db, candidate.id, "promoted");
+    }
+  }
+
+  out.stat("Applied", `${appliedCandidates.length} candidate(s)`);
+
+  if (!input.wantCreatePr) {
+    out.info(`Digest: ${input.digestPath}`);
+    out.info("Headless apply complete. Pass --create-pr to also open a PR.");
+    return;
+  }
+
+  if (appliedCandidates.length === 0) {
+    out.info("--create-pr: no candidates were applied — no PR opened.");
+    return;
+  }
+
+  await openBundledPr({
+    candidates: appliedCandidates,
+    files: Array.from(appliedFiles),
+    sinceDays: input.sinceDays,
+    stats: input.stats,
+    digestPath: input.digestPath,
+    repo: input.repo,
+    baseBranch: input.baseBranch,
+    draftingModel: input.draftingModel,
+    costTracker: input.costTracker,
+    outputLanguage: input.config.language.preferredOutput,
+  });
+}
+
+type BundledPrInput = {
+  candidates: Array<PromotionCandidate & { targetFile: string }>;
+  files: string[];
+  sinceDays: number;
+  stats: AnalysisStats;
+  digestPath: string;
+  repo: string;
+  baseBranch?: string;
+  draftingModel: ReturnType<typeof resolveModels>["draftingModel"];
+  costTracker: CostTracker;
+  outputLanguage: string;
+};
+
+async function openBundledPr(input: BundledPrInput) {
+  const ghAvailable = hasGhCli() && isGhAuthenticated();
+  if (!ghAvailable && !process.env.GITHUB_TOKEN) {
+    out.error("`gh` CLI not authenticated and GITHUB_TOKEN not set — cannot open a PR.");
+    process.exit(1);
+  }
+
+  const localRepo = detectLocalRepoSilent();
+  const prRepo = localRepo ?? input.repo;
+  if (localRepo && localRepo !== input.repo) {
+    out.info(`PR target: ${chalk.bold(localRepo)} (scanned repo was ${input.repo}).`);
+  }
+
+  const octokit = ghAvailable ? undefined : createOctokit();
+  const date = new Date();
+  const branch = buildBranchName({ candidateIds: input.candidates.map((c) => c.id), date });
+  const title = buildBundledPrTitle(date, input.candidates.length);
+  const template = findPullRequestTemplate();
+  const relativeDigestPath = toRelative(input.digestPath);
+
+  let prefilledHeader: string | undefined;
+  if (template) {
+    const fillSpin = out.spinner(`Filling ${template.path} with LLM...`);
+    try {
+      prefilledHeader = await fillTemplateWithLlm({
+        templateBody: template.body,
+        facts: {
+          candidates: input.candidates,
+          sinceDays: input.sinceDays,
+          prCount: input.stats.prCount,
+          digestPath: relativeDigestPath,
+        },
+        model: input.draftingModel,
+        costTracker: input.costTracker,
+        outputLanguage: input.outputLanguage,
+      });
+      fillSpin.succeed(`Filled ${template.path} (LLM)`);
+    } catch (err) {
+      fillSpin.warn(
+        `LLM template fill failed; passing the template through unfilled. (${err instanceof Error ? err.message : String(err)})`,
+      );
+      prefilledHeader = template.body;
+    }
+  }
+
+  const body = buildBundledPrBody({
+    candidates: input.candidates,
+    stats: { prCount: input.stats.prCount },
+    sinceDays: input.sinceDays,
+    date,
+    prefilledHeader,
+    digestPath: relativeDigestPath,
+  });
+
+  const filesToCommit = [...input.files];
+  if (existsSync(input.digestPath) && !filesToCommit.includes(relativeDigestPath)) {
+    filesToCommit.push(relativeDigestPath);
+  }
+
+  out.divider();
+  const spin = out.spinner(`Opening PR via ${ghAvailable ? "gh" : "octokit"}...`);
+  try {
+    const result = await createPullRequest({
+      branch,
+      title,
+      body,
+      files: filesToCommit,
+      repo: prRepo,
+      baseBranch: input.baseBranch,
+      labels: ["memory-promotion"],
+      octokit,
+    });
+    spin.succeed(`PR opened: ${result.url}`);
+  } catch (err) {
+    spin.fail("PR creation failed.");
+    throw err;
+  }
+}
+
+function detectLocalRepoSilent(): string | null {
+  try {
+    return detectCurrentRepo();
+  } catch {
+    return null;
+  }
+}
+
+function toRelative(absPath: string): string {
+  const cwd = process.cwd();
+  if (absPath.startsWith(cwd)) {
+    return absPath.slice(cwd.length).replace(/^[/\\]/, "");
+  }
+  return absPath;
 }
 
 function detectCurrentRepo(): string {

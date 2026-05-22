@@ -1,5 +1,6 @@
 import { writeFileSync, readFileSync, existsSync, mkdirSync, readdirSync } from "node:fs";
 import { resolve, dirname } from "node:path";
+import { execSync } from "node:child_process";
 import chalk from "chalk";
 import * as p from "@clack/prompts";
 import type { PromotionCandidate } from "../../core/types.js";
@@ -10,12 +11,25 @@ import * as out from "../output.js";
 import { mascotHappy, mascotSays } from "../mascot.js";
 import { printCandidateDetails, runInteractiveReview } from "./review.js";
 import { notifyIfOutdated } from "../update-check.js";
+import { createOctokit } from "../../ingest/github-client.js";
+import { buildSingleBranchName } from "../../pr/branch.js";
+import { findPullRequestTemplate, buildSinglePrBody, buildSinglePrTitle } from "../../pr/template.js";
+import { fillTemplateWithLlm } from "../../pr/llm-fill.js";
+import { createPullRequest, hasGhCli, isGhAuthenticated } from "../../pr/create.js";
+import { resolveModels } from "../../llm/provider.js";
+import { CostTracker } from "../../llm/cost-tracker.js";
 
 export type PromoteOptions = {
   target?: string;
   file?: string;
   config?: string;
+  createPr?: boolean;
+  baseBranch?: string;
 };
+
+export type ApplyPromotionResult =
+  | { applied: true; targetFile: string }
+  | { applied: false; reason: "invalid-target" | "missing-file-declined" };
 
 /**
  * Core write function used by both interactive review and standalone promote.
@@ -24,30 +38,37 @@ export type PromoteOptions = {
 export async function applyPromotion(
   candidate: PromotionCandidate,
   target: string,
-) {
+  opts: { suppressPrompts?: boolean } = {},
+): Promise<ApplyPromotionResult> {
   const config = loadConfig();
   const targetFile = resolveTargetFile(target, candidate, config);
 
   if (!isValidFilePath(targetFile)) {
     out.warn(`${candidate.id}: target "${target}" doesn't produce a writable file. Skipping.`);
-    return;
+    return { applied: false, reason: "invalid-target" };
   }
 
   const cwd = process.cwd();
   const fullPath = resolve(cwd, targetFile);
 
   if (!existsSync(fullPath)) {
-    const create = await p.confirm({
-      message: `${targetFile} doesn't exist. Create it?`,
-    });
-
-    if (p.isCancel(create)) {
-      out.info("Cancelled.");
-      process.exit(130);
+    let create: boolean;
+    if (opts.suppressPrompts) {
+      create = true;
+    } else {
+      const answer = await p.confirm({
+        message: `${targetFile} doesn't exist. Create it?`,
+      });
+      if (p.isCancel(answer)) {
+        out.info("Cancelled.");
+        process.exit(130);
+      }
+      create = answer;
     }
+
     if (!create) {
       out.info(`Skipped ${candidate.id}. Create the file manually and run again.`);
-      return;
+      return { applied: false, reason: "missing-file-declined" };
     }
 
     const dir = dirname(fullPath);
@@ -61,6 +82,7 @@ export async function applyPromotion(
   const separator = existing.length > 0 && !existing.endsWith("\n\n") ? "\n\n" : "";
   writeFileSync(fullPath, existing + separator + candidate.draft.content + "\n", "utf-8");
   out.success(`Promoted to ${chalk.bold(targetFile)}: ${candidate.summary}`);
+  return { applied: true, targetFile };
 }
 
 /**
@@ -118,8 +140,101 @@ export async function runPromote(candidateId: string, options: PromoteOptions) {
     return;
   }
 
-  await applyPromotion(candidate, target);
+  const result = await applyPromotion(candidate, target);
+  if (!result.applied) {
+    return;
+  }
   updateCandidateStatus(db, candidateId, "promoted");
+
+  if (options.createPr) {
+    await openSinglePr(candidate, result.targetFile, options.baseBranch);
+  }
+}
+
+async function openSinglePr(candidate: PromotionCandidate, targetFile: string, baseBranch?: string) {
+  const ghAvailable = hasGhCli() && isGhAuthenticated();
+  if (!ghAvailable && !process.env.GITHUB_TOKEN) {
+    out.error("`gh` CLI not authenticated and GITHUB_TOKEN not set — cannot open a PR.");
+    out.info("Run `gh auth login` or export GITHUB_TOKEN, then re-run with --create-pr.");
+    process.exit(1);
+  }
+
+  const localRepo = detectLocalRepoSilent();
+  const prRepo = localRepo ?? candidate.repo;
+  if (localRepo && localRepo !== candidate.repo) {
+    out.info(`PR target: ${chalk.bold(localRepo)} (candidate's source repo was ${candidate.repo}).`);
+  }
+
+  const octokit = ghAvailable ? undefined : createOctokit();
+  const config = loadConfig();
+  const date = new Date();
+  const branch = buildSingleBranchName(candidate.id, date);
+  const title = buildSinglePrTitle({ summary: candidate.summary });
+  const template = findPullRequestTemplate();
+  const candidateWithFile = { ...candidate, targetFile };
+
+  let prefilledHeader: string | undefined;
+  if (template) {
+    const fillSpin = out.spinner(`Filling ${template.path} with LLM...`);
+    try {
+      const models = resolveModels(config.llm);
+      const costTracker = new CostTracker(config.llm.draftingModel);
+      prefilledHeader = await fillTemplateWithLlm({
+        templateBody: template.body,
+        facts: {
+          candidates: [candidateWithFile],
+          sinceDays: config.thresholds.windowDays,
+        },
+        model: models.draftingModel,
+        costTracker,
+        outputLanguage: config.language.preferredOutput,
+      });
+      fillSpin.succeed(`Filled ${template.path} (LLM)`);
+    } catch (err) {
+      fillSpin.warn(
+        `LLM template fill failed; passing the template through unfilled. (${err instanceof Error ? err.message : String(err)})`,
+      );
+      prefilledHeader = template.body;
+    }
+  }
+
+  const body = buildSinglePrBody({
+    candidate: candidateWithFile,
+    date,
+    prefilledHeader,
+  });
+
+  out.divider();
+  const spin = out.spinner(`Opening PR via ${ghAvailable ? "gh" : "octokit"}...`);
+  try {
+    const result = await createPullRequest({
+      branch,
+      title,
+      body,
+      files: [targetFile],
+      repo: prRepo,
+      baseBranch,
+      labels: ["memory-promotion"],
+      octokit,
+    });
+    spin.succeed(`PR opened: ${result.url}`);
+  } catch (err) {
+    spin.fail("PR creation failed.");
+    throw err;
+  }
+}
+
+function detectLocalRepoSilent(): string | null {
+  try {
+    const url = execSync("git remote get-url origin", { encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] }).trim();
+    const sshMatch = url.match(/github\.com[:/]([^/]+\/[^/.]+)/);
+    if (sshMatch) return sshMatch[1];
+    const httpsMatch = url.match(/github\.com\/([^/]+\/[^/.]+)/);
+    if (httpsMatch) return httpsMatch[1];
+    return null;
+  } catch {
+    return null;
+  }
 }
 
 /**
