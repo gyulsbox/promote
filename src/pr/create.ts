@@ -43,7 +43,15 @@ export function isGhAuthenticated(): boolean {
 }
 
 function run(cmd: string, args: string[], cwd: string): string {
-  return execFileSync(cmd, args, { cwd, encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"] }).trim();
+  try {
+    return execFileSync(cmd, args, { cwd, encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"] }).trim();
+  } catch (e) {
+    const err = e as { stderr?: Buffer | string; stdout?: Buffer | string; message?: string };
+    const stderr = err.stderr ? err.stderr.toString().trim() : "";
+    const stdout = err.stdout ? err.stdout.toString().trim() : "";
+    const detail = stderr || stdout || err.message || "unknown error";
+    throw new Error(`\`${cmd} ${args[0] ?? ""}\` failed: ${detail}`);
+  }
 }
 
 function detectDefaultBranch(cwd: string): string {
@@ -183,15 +191,30 @@ async function createWithGh(input: CreatePullRequestInput, baseBranch: string, c
     ];
     const url = run("gh", args, cwd);
 
-    // Step 2: attach labels as best-effort. Auto-create missing labels (e.g.
-    // first-ever memory-promotion PR on a repo). If the user lacks label
-    // perms or label creation fails, log and continue — the PR itself is fine.
+    // Resolve a stable PR reference from the URL. `gh pr edit <branch>` can
+    // be ambiguous when multiple PRs exist for a branch; the PR number is not.
+    const prNumberMatch = url.match(/\/pull\/(\d+)\b/);
+    const prRef = prNumberMatch ? prNumberMatch[1] : input.branch;
+
+    // Step 2: attach labels as best-effort. Auto-create missing labels via
+    // `gh label create --force`. Surface any failures to stderr so the user
+    // notices when the labels they expected didn't land (previous version
+    // swallowed both steps silently).
     for (const label of input.labels ?? []) {
       try {
         ensureLabelExists(label, cwd);
-        run("gh", ["pr", "edit", input.branch, "--add-label", label], cwd);
-      } catch {
-        // best-effort
+      } catch (e) {
+        process.stderr.write(
+          `[promote] could not create label '${label}': ${e instanceof Error ? e.message : String(e)}\n`,
+        );
+        continue;
+      }
+      try {
+        run("gh", ["pr", "edit", prRef, "--add-label", label], cwd);
+      } catch (e) {
+        process.stderr.write(
+          `[promote] could not attach label '${label}' to PR #${prRef}: ${e instanceof Error ? e.message : String(e)}\n`,
+        );
       }
     }
 
@@ -202,18 +225,15 @@ async function createWithGh(input: CreatePullRequestInput, baseBranch: string, c
 }
 
 function ensureLabelExists(label: string, cwd: string) {
-  // `gh label create` exits 0 if created, exits non-zero if it exists. The
-  // --force flag makes it idempotent (updates color/description if different).
-  try {
-    run("gh", [
-      "label", "create", label,
-      "--color", "B660CD",
-      "--description", "Repository memory promotion (promote-cli)",
-      "--force",
-    ], cwd);
-  } catch {
-    // ignore — caller will catch the addLabels failure if relevant
-  }
+  // `gh label create --force` is idempotent: creates if missing, updates
+  // color/description if present. Throws (via our wrapped run) on real
+  // failures like missing permissions.
+  run("gh", [
+    "label", "create", label,
+    "--color", "B660CD",
+    "--description", "Repository memory promotion (promote-cli)",
+    "--force",
+  ], cwd);
 }
 
 async function createWithOctokit(input: CreatePullRequestInput, baseBranch: string): Promise<string> {
