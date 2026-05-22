@@ -1,10 +1,12 @@
 import { generateObject } from "ai";
 import { z } from "zod";
 import type { LanguageModel } from "ai";
-import type { Cluster, RoutingDecision } from "../core/types.js";
+import type { Cluster, RoutingDecision, HumanReactionSignal } from "../core/types.js";
 import type { MemoryContext } from "../memory/memory-scanner.js";
 import type { CostTracker } from "../llm/cost-tracker.js";
 import { CLASSIFICATION_SYSTEM_PROMPT, buildClassificationPrompt } from "./prompts.js";
+import { redactSecrets } from "../normalize/redact.js";
+import { seedIfSupported, temperatureIfSupported, llmProviderOptions } from "../llm/provider.js";
 
 const routingDecisionSchema = z.object({
   clusterValid: z
@@ -39,14 +41,22 @@ export async function classifyCluster(input: {
   memoryContext: MemoryContext;
   costTracker: CostTracker;
   outputLanguage?: string;
+  redact?: boolean;
+  humanSignal?: HumanReactionSignal;
+  includeDiffHunks?: boolean;
 }): Promise<RoutingDecision> {
-  const { cluster, model, memoryContext, costTracker, outputLanguage } = input;
+  const { cluster, model, memoryContext, costTracker, outputLanguage, redact = true, humanSignal, includeDiffHunks = false } = input;
 
   // Build examples (cap at 5)
   const examples = cluster.members.slice(0, 5).map((m) => ({
     prNumber: m.prNumber,
     path: m.filePath,
-    excerpt: m.normalizedBody.slice(0, 300),
+    excerpt: redact
+      ? redactSecrets(m.normalizedBody.slice(0, 300))
+      : m.normalizedBody.slice(0, 300),
+    severity:
+      m.severityMarker.level !== "unknown" ? m.severityMarker.level : undefined,
+    diffHunk: includeDiffHunks ? m.diffHunk : undefined,
   }));
 
   // Collect all identifiers and paths across members
@@ -65,12 +75,18 @@ export async function classifyCluster(input: {
     paths: allPaths,
     existingMemory: memoryContext.snippets,
     outputLanguage,
+    humanSignal,
   });
 
   const { object, usage } = await generateObject({
     model,
     schema: routingDecisionSchema,
-    temperature: 0,
+    // OpenAI's structured-outputs strict mode rejects .optional/.min/.max constraints
+    // that our schema legitimately uses. Disable strict mode for OpenAI; Anthropic/Google
+    // ignore this option and continue to use their native tool-use paths.
+    providerOptions: llmProviderOptions(model),
+    ...temperatureIfSupported(model),
+    ...seedIfSupported(model),
     system: CLASSIFICATION_SYSTEM_PROMPT,
     prompt,
   });
@@ -80,5 +96,12 @@ export async function classifyCluster(input: {
     completionTokens: usage?.outputTokens ?? 0,
   });
 
-  return object as RoutingDecision;
+  let { confidence, needsHumanDecision } = object as RoutingDecision;
+
+  if (humanSignal) {
+    if (humanSignal.rejectionCount > 0) needsHumanDecision = true;
+    if (humanSignal.agreementCount >= 2) confidence = Math.min(0.97, confidence + 0.05);
+  }
+
+  return { ...(object as RoutingDecision), confidence, needsHumanDecision };
 }

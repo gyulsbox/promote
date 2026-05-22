@@ -2,18 +2,22 @@ import { z } from "zod";
 import { readFileSync, existsSync } from "node:fs";
 import { parse as parseYaml } from "yaml";
 import { resolve } from "node:path";
+import chalk from "chalk";
 import type { PromoteConfig } from "./types.js";
+import { migrateConfig, CURRENT_CONFIG_VERSION } from "./migrations.js";
 
 const promoteConfigSchema = z.object({
-  version: z.literal(1),
+  version: z.literal(CURRENT_CONFIG_VERSION),
 
   language: z
     .object({
       preferredOutput: z.enum(["en", "ja", "ko"]).default("en"),
-      fallback: z.enum(["en", "ja", "ko"]).default("en"),
     })
-    .default({ preferredOutput: "en", fallback: "en" }),
+    .default({ preferredOutput: "en" }),
 
+  // Defaults include multiple aliases per bot vendor (e.g. github-copilot[bot] vs copilot[bot],
+  // coderabbitai[bot] vs coderabbit-openai[bot], qodo-merge-pro[bot] vs qodo-merge-pro-for-open-source[bot]).
+  // GitHub has historically renamed bot accounts; keeping both forms here is defensive.
   aiReviewers: z
     .array(z.string())
     .default([
@@ -63,17 +67,34 @@ const promoteConfigSchema = z.object({
 
   thresholds: z
     .object({
-      minOccurrences: z.number().int().min(2).default(3),
+      // 2 (was 3): on real repos at 60d windows, ≥3 was too strict — most
+      // clusters were singletons or pairs, leaving emerging patterns invisible.
+      // Counting pairs as "repeated" surfaces the second occurrence as a
+      // candidate so the user can decide whether it's worth promoting early.
+      minOccurrences: z.number().int().min(2).default(2),
       windowDays: z.number().int().min(1).default(60),
-      similarityThreshold: z.number().min(0).max(1).default(0.82),
+      // 0.80 (was 0.85): v0.3 bot-signature/markdown stripping removes a lot of
+      // shared boilerplate, lowering pairwise cosine similarity between semantically
+      // equivalent comments. llmRefine (margin 0.15) catches borderline pairs in
+      // [0.65, 0.80), keeping false-merges under control.
+      similarityThreshold: z.number().min(0).max(1).default(0.80),
       minConfidence: z.number().min(0).max(1).default(0.75),
     })
-    .default({ minOccurrences: 3, windowDays: 60, similarityThreshold: 0.82, minConfidence: 0.75 }),
+    .default({ minOccurrences: 2, windowDays: 60, similarityThreshold: 0.80, minConfidence: 0.75 }),
 
   llm: z
     .object({
       provider: z.enum(["openai", "anthropic", "google"]).default("openai"),
       classificationModel: z.string().default("gpt-4.1-mini"),
+      // Only affects LLM-direct clustering (anthropic, or any provider with
+      // clusteringStrategy=llm-direct) and llmRefine borderline merges.
+      // Defaults to classificationModel when unset.
+      clusteringModel: z.string().optional(),
+      // "embedding" uses HAC over embeddings; "llm-direct" forces semantic
+      // grouping via the clusteringModel even on providers with embeddings.
+      // Default is "embedding" — Anthropic auto-promotes to "llm-direct"
+      // internally since it has no embedding API.
+      clusteringStrategy: z.enum(["embedding", "llm-direct"]).optional(),
       draftingModel: z.string().default("gpt-4.1-mini"),
       embeddingModel: z.string().default("text-embedding-3-small"),
     })
@@ -91,19 +112,28 @@ export function loadConfig(configPath?: string): PromoteConfig {
   const filePath = configPath ?? resolve(process.cwd(), ".promote.yml");
 
   if (!existsSync(filePath)) {
-    return promoteConfigSchema.parse({ version: 1 });
+    return promoteConfigSchema.parse({ version: CURRENT_CONFIG_VERSION });
   }
 
   const raw = readFileSync(filePath, "utf-8");
   const parsed = parseYaml(raw);
-  return promoteConfigSchema.parse(parsed);
+  const { config, fromVersion, migrated } = migrateConfig(parsed);
+
+  if (migrated && fromVersion !== undefined) {
+    process.stderr.write(
+      chalk.dim(
+        `  Config migrated v${fromVersion} → v${CURRENT_CONFIG_VERSION} in memory. To persist, update 'version:' in ${filePath}.\n`,
+      ),
+    );
+  }
+
+  return promoteConfigSchema.parse(config);
 }
 
-export const DEFAULT_CONFIG_CONTENT = `version: 1
+export const DEFAULT_CONFIG_CONTENT = `version: 2
 
 # language:
 #   preferredOutput: en
-#   fallback: en
 
 # aiReviewers:
 #   - github-copilot[bot]
@@ -130,14 +160,15 @@ export const DEFAULT_CONFIG_CONTENT = `version: 1
 #     mode: recommendation
 
 # thresholds:
-#   minOccurrences: 3
+#   minOccurrences: 2
 #   windowDays: 60
-#   similarityThreshold: 0.82
+#   similarityThreshold: 0.80
 #   minConfidence: 0.75
 
 # llm:
 #   provider: openai
 #   classificationModel: gpt-4.1-mini
+#   clusteringModel: gpt-4.1-mini    # used by LLM-direct clustering (anthropic) + llmRefine (openai/google)
 #   draftingModel: gpt-4.1-mini
 #   embeddingModel: text-embedding-3-small
 

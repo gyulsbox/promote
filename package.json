@@ -1,6 +1,6 @@
 {
   "name": "promote-cli",
-  "version": "0.1.2",
+  "version": "0.4.0",
   "description": "Promote repeated AI review comments into durable repository memory",
   "type": "module",
   "bin": {

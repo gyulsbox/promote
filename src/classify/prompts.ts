@@ -23,6 +23,7 @@ Decision rules:
 - When confidence is below 0.7, set needsHumanDecision to true.`;
 
 import { sanitizeUnicode } from "../normalize/sanitize.js";
+import type { HumanReactionSignal } from "../core/types.js";
 
 const LANG_NAMES: Record<string, string> = {
   ko: "Korean",
@@ -32,17 +33,23 @@ const LANG_NAMES: Record<string, string> = {
 
 export function buildClassificationPrompt(input: {
   summary: string;
-  examples: Array<{ prNumber: number; path?: string; excerpt: string }>;
+  examples: Array<{ prNumber: number; path?: string; excerpt: string; severity?: string; diffHunk?: string }>;
   identifiers: string[];
   paths: string[];
   existingMemory: string[];
   outputLanguage?: string;
+  humanSignal?: HumanReactionSignal;
 }): string {
   const exampleList = input.examples
-    .map(
-      (e, i) =>
-        `${i + 1}. PR #${e.prNumber}${e.path ? ` [${e.path}]` : ""}: ${sanitizeUnicode(e.excerpt)}`,
-    )
+    .map((e, i) => {
+      const sev = e.severity ? `[${e.severity}] ` : "";
+      let line = `${i + 1}. ${sev}PR #${e.prNumber}${e.path ? ` [${e.path}]` : ""}: ${sanitizeUnicode(e.excerpt)}`;
+      if (e.diffHunk) {
+        const hunk = e.diffHunk.slice(0, 150).replace(/\n/g, "↵");
+        line += `\n   diff: ${hunk}`;
+      }
+      return line;
+    })
     .join("\n");
 
   const identifierList =
@@ -60,6 +67,21 @@ export function buildClassificationPrompt(input: {
       ? `\n\nExisting repository memory:\n${input.existingMemory.join("\n\n")}`
       : "\n\nNo existing repository memory files found.";
 
+  const humanSignalSection = (() => {
+    const s = input.humanSignal;
+    if (!s) return "";
+    const parts: string[] = [];
+    if (s.agreementCount > 0) parts.push(`${s.agreementCount} reviewer(s) agreed (e.g. "good catch", "LGTM")`);
+    if (s.rejectionCount > 0) parts.push(`${s.rejectionCount} reviewer(s) indicated this is a special case or intentional`);
+    if (s.plusOneCount > 0) parts.push(`👍 ${s.plusOneCount}`);
+    if (s.minusOneCount > 0) parts.push(`👎 ${s.minusOneCount}`);
+    if (parts.length === 0) return "";
+    let section = `\nHuman reviewer reactions: ${parts.join(", ")}.`;
+    if (s.firstAgreementExcerpt) section += `\nAgreement context: "${s.firstAgreementExcerpt}"`;
+    if (s.firstRejectExcerpt) section += `\nDismissal context: "${s.firstRejectExcerpt}"`;
+    return section;
+  })();
+
   const langInstruction = input.outputLanguage && input.outputLanguage !== "en"
     ? `\n\nIMPORTANT: Write the summary and reason fields in ${LANG_NAMES[input.outputLanguage] ?? input.outputLanguage}.`
     : "";
@@ -68,7 +90,7 @@ export function buildClassificationPrompt(input: {
 
 Cluster summary: ${input.summary}
 ${identifierList}${pathList}
-
+${humanSignalSection}
 Examples:
 ${exampleList}
 ${memoryContext}

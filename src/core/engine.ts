@@ -1,16 +1,14 @@
-import { createHash } from "node:crypto";
 import type { Octokit } from "octokit";
 import type {
   RepoRef,
   PromoteConfig,
   PromotionCandidate,
   AnalysisStats,
-  Cluster,
   AnalyzeReviewMemoryOutput,
 } from "./types.js";
 import type { ResolvedModels } from "../llm/provider.js";
 import type { CostTracker } from "../llm/cost-tracker.js";
-import { fetchReviewComments, computeSinceDate } from "../ingest/comment-fetcher.js";
+import { fetchReviewComments, fetchPrConversationComments, computeSinceDate } from "../ingest/comment-fetcher.js";
 import { filterAIReviewComments } from "../filter/ai-reviewer-filter.js";
 import { filterNoise } from "../filter/noise-filter.js";
 import { normalizeComments } from "../normalize/normalizer.js";
@@ -18,6 +16,8 @@ import { preCluster } from "../cluster/pre-cluster.js";
 import { scanExistingMemory } from "../memory/memory-scanner.js";
 import { classifyCluster } from "../classify/route-classifier.js";
 import { generateDraft } from "../draft/draft-generator.js";
+import { buildReplyContextMap } from "../ingest/reply-context.js";
+import { aggregateHumanSignal } from "./human-signal.js";
 
 export type EngineCallbacks = {
   onProgress?: (step: string, detail?: string) => void;
@@ -42,12 +42,35 @@ export async function analyzeReviewMemory(input: {
 
   // 2. Filter
   onProgress("filter", "Filtering...");
-  const { ai } = filterAIReviewComments(allComments, config.aiReviewers);
+  const { ai, human } = filterAIReviewComments(allComments, config.aiReviewers);
   const { kept } = filterNoise(ai);
 
   // 3. Normalize
   onProgress("normalize", "Normalizing...");
   const normalized = normalizeComments(kept);
+
+  // 3b. Build reply context map from human replies + general PR conversation comments
+  onProgress("filter", "Analyzing human reactions...");
+  const prNumbers = new Set(ai.map((c) => c.prNumber));
+  let generalHuman: typeof ai = [];
+  try {
+    generalHuman = await fetchPrConversationComments(octokit, repo, prNumbers, sinceDate, config.aiReviewers);
+  } catch {
+    generalHuman = [];
+  }
+
+  let replyContextMap: Awaited<ReturnType<typeof buildReplyContextMap>>;
+  try {
+    replyContextMap = await buildReplyContextMap(
+      ai,
+      human,
+      models.classificationModel,
+      costTracker,
+      generalHuman,
+    );
+  } catch {
+    replyContextMap = new Map();
+  }
 
   // 4. Pre-cluster
   onProgress("cluster", "Clustering...");
@@ -55,15 +78,24 @@ export async function analyzeReviewMemory(input: {
     comments: normalized,
     embeddingModel: models.embeddingModel,
     classificationModel: models.classificationModel,
+    clusteringModel: models.clusteringModel,
+    clusteringStrategy: config.llm.clusteringStrategy,
     similarityThreshold: config.thresholds.similarityThreshold,
     costTracker,
     onProgress: (msg) => onProgress("cluster", msg),
   });
 
-  // 5. Filter repeated
+  // 5. Filter repeated by total members; scope (cross-PR vs within-PR) is
+  // surfaced per candidate downstream rather than used as a hard filter.
   const repeatedClusters = clusters.filter(
     (c) => c.members.length >= config.thresholds.minOccurrences,
   );
+  // Sort cross-PR (higher-value) first
+  repeatedClusters.sort((a, b) => {
+    const aPrs = new Set(a.members.map((m) => m.prNumber)).size;
+    const bPrs = new Set(b.members.map((m) => m.prNumber)).size;
+    return bPrs - aPrs;
+  });
 
   // 6. Scan existing memory
   onProgress("memory", "Scanning existing memory files...");
@@ -72,58 +104,73 @@ export async function analyzeReviewMemory(input: {
   // 7. Classify + Draft each repeated cluster
   const candidates: PromotionCandidate[] = [];
   let candidateIndex = 1;
+  let failedClusters = 0;
 
   for (const cluster of repeatedClusters) {
     onProgress("classify", `Classifying cluster ${candidateIndex}/${repeatedClusters.length}...`);
 
-    const decision = await classifyCluster({
-      cluster,
-      model: models.classificationModel,
-      memoryContext,
-      costTracker,
-    });
+    // Aggregate human reply/reaction signal for this cluster
+    cluster.humanSignal = aggregateHumanSignal(cluster, replyContextMap);
 
-    // Skip low confidence or non-promotable
-    if (!decision.clusterValid) continue;
-    if (decision.target === "none" || decision.target === "pr_only") continue;
-    if (decision.confidence < config.thresholds.minConfidence) continue;
+    try {
+      const decision = await classifyCluster({
+        cluster,
+        model: models.classificationModel,
+        memoryContext,
+        costTracker,
+        redact: config.privacy.redactSecrets,
+        humanSignal: cluster.humanSignal,
+        includeDiffHunks: config.privacy.sendDiffHunksToLLM,
+      });
 
-    onProgress("draft", `Drafting candidate ${candidateIndex}...`);
+      // Skip low confidence or non-promotable
+      if (!decision.clusterValid) continue;
+      if (decision.target === "none" || decision.target === "pr_only") continue;
+      if (decision.confidence < config.thresholds.minConfidence) continue;
 
-    const draft = await generateDraft({
-      cluster,
-      decision,
-      model: models.draftingModel,
-      costTracker,
-      preferredLanguage: config.language.preferredOutput,
-    });
+      onProgress("draft", `Drafting candidate ${candidateIndex}...`);
 
-    const candidateId = `candidate_${String(candidateIndex).padStart(3, "0")}`;
+      const draft = await generateDraft({
+        cluster,
+        decision,
+        model: models.draftingModel,
+        costTracker,
+        preferredLanguage: config.language.preferredOutput,
+        redact: config.privacy.redactSecrets,
+      });
 
-    candidates.push({
-      id: candidateId,
-      repo: repo.fullName,
-      clusterId: cluster.id,
-      summary: decision.summary,
-      target: decision.target,
-      confidence: decision.confidence,
-      suggestedFile: decision.suggestedFile ?? draft.targetFile,
-      pathScope: decision.pathScope,
-      draft,
-      reasoning: decision.reason,
-      alternatives: decision.alternatives,
-      occurrences: cluster.members.map((m) => ({
-        prNumber: m.prNumber,
-        path: m.filePath,
-        url: m.htmlUrl,
-        excerpt: m.normalizedBody.slice(0, 150),
-        authorLogin: m.authorLogin,
-        createdAt: m.createdAt,
-      })),
-      status: decision.needsHumanDecision ? "needs_human_decision" : "candidate",
-    });
+      const candidateId = `candidate_${String(candidateIndex).padStart(3, "0")}`;
 
-    candidateIndex++;
+      candidates.push({
+        id: candidateId,
+        repo: repo.fullName,
+        clusterId: cluster.id,
+        clusterFingerprint: cluster.fingerprint,
+        summary: decision.summary,
+        target: decision.target,
+        confidence: decision.confidence,
+        suggestedFile: decision.suggestedFile ?? draft.targetFile,
+        pathScope: decision.pathScope,
+        draft,
+        reasoning: decision.reason,
+        alternatives: decision.alternatives,
+        occurrences: cluster.members.map((m) => ({
+          prNumber: m.prNumber,
+          path: m.filePath,
+          url: m.htmlUrl,
+          excerpt: m.normalizedBody.slice(0, 150),
+          authorLogin: m.authorLogin,
+          createdAt: m.createdAt,
+        })),
+        status: decision.needsHumanDecision ? "needs_human_decision" : "candidate",
+        humanSignal: cluster.humanSignal,
+      });
+
+      candidateIndex++;
+    } catch (err) {
+      failedClusters++;
+      onProgress("error", `Cluster ${candidateIndex} failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
   }
 
   // Build stats
@@ -137,9 +184,10 @@ export async function analyzeReviewMemory(input: {
     clustersFound: clusters.length,
     repeatedClusters: repeatedClusters.length,
     candidatesGenerated: candidates.length,
+    failedClusters,
     prCount: uniquePrs.size,
-    embeddingTokens: cost.totalPromptTokens,
-    classificationTokens: cost.totalCompletionTokens,
+    promptTokens: cost.totalPromptTokens,
+    completionTokens: cost.totalCompletionTokens,
     estimatedCostUSD: cost.estimatedCostUSD,
   };
 

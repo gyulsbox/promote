@@ -5,6 +5,7 @@ import { resolve, dirname } from "node:path";
 import chalk from "chalk";
 import { printWelcome, mascotSays } from "../mascot.js";
 import * as out from "../output.js";
+import { notifyIfOutdated } from "../update-check.js";
 
 type DetectedKey = {
   provider: string;
@@ -31,6 +32,7 @@ const KEY_CHECKS: Array<{ provider: string; envVars: string[]; label: string }> 
 ];
 
 export async function runInit() {
+  await notifyIfOutdated();
   printWelcome();
 
   p.intro(chalk.bgCyan(chalk.black(" promote init ")));
@@ -117,14 +119,51 @@ export async function runInit() {
     message: "How strict should pattern matching be?",
     options: [
       { value: "0.85", label: "Strict", hint: "fewer but higher confidence matches" },
-      { value: "0.82", label: "Balanced (recommended)", hint: "default threshold" },
-      { value: "0.75", label: "Relaxed", hint: "more matches, some may be noisy" },
+      { value: "0.80", label: "Balanced (recommended)", hint: "default — catches most repeated patterns with llmRefine safety net" },
+      { value: "0.72", label: "Relaxed", hint: "more matches, more LLM refine calls" },
     ],
   });
 
   if (p.isCancel(threshold)) {
     p.cancel("Setup cancelled.");
     process.exit(0);
+  }
+
+  // 5b. Clustering mode — affects what KIND of patterns surface.
+  // Anthropic has no embedding API, so 'quick' isn't an option there; the
+  // provider is forced into llm-direct mode regardless of this choice.
+  // Skip the prompt to avoid a misleading question.
+  let clusteringStrategy: string;
+  if (provider === "anthropic") {
+    clusteringStrategy = "llm-direct";
+    p.note(
+      "Anthropic has no embedding API — clustering will use LLM-direct (broader/principle-level patterns) automatically.",
+      "Clustering mode",
+    );
+  } else {
+    const choice = await p.select({
+      message: "What kind of patterns do you want surfaced?",
+      options: [
+        {
+          value: "embedding",
+          label: "Quick — code-level patterns (recommended for this provider)",
+          hint: "embedding + HAC, narrow patterns tied to specific files/lines, cheapest",
+        },
+        {
+          value: "llm-direct",
+          label: "Broad — convention / principle patterns",
+          hint:
+            provider === "openai"
+              ? "LLM-direct, deeper rules — but Anthropic Claude is better at this; OpenAI broad on tier-1 produces fewer candidates and tier-1 limits cap full-tier models"
+              : "LLM-direct semantic clustering, repo-wide rules, ~3x cost",
+        },
+      ],
+    });
+    if (p.isCancel(choice)) {
+      p.cancel("Setup cancelled.");
+      process.exit(0);
+    }
+    clusteringStrategy = choice as string;
   }
 
   // 6. Memory target — which AI tool's instruction format
@@ -201,6 +240,7 @@ export async function runInit() {
     provider: provider as string,
     language: language as string,
     threshold: threshold as string,
+    clusteringStrategy: clusteringStrategy as string,
     memoryFile,
     pathScopedDir: pathScopedDir as string,
     adrDir: adrDir as string,
@@ -288,7 +328,7 @@ export async function runInit() {
       `  promote scan --repo owner/repo --since 90d`,
       ``,
       `${chalk.bold("After scan:")}`,
-      `  promote promote candidate_001 --target agents --write`,
+      `  promote candidate_001           # apply with confirm prompt`,
       `  promote --help                # all commands`,
     ].join("\n"),
     "Next steps",
@@ -344,22 +384,22 @@ function buildProviderOptions(detected: DetectedKey[]) {
       value: "openai",
       label: "OpenAI",
       hint: detectedProviders.has("openai")
-        ? "✓ key detected"
-        : "requires OPENAI_API_KEY",
+        ? "✓ key detected — embedding+HAC clustering (cheap, narrow code-level patterns)"
+        : "embedding+HAC clustering, narrow code-level patterns",
     },
     {
       value: "google",
       label: "Google Gemini",
       hint: detectedProviders.has("google")
-        ? "✓ key detected"
-        : "free tier available",
+        ? "✓ key detected — free tier available"
+        : "free tier available, embedding+HAC clustering",
     },
     {
       value: "anthropic",
       label: "Anthropic (Claude)",
       hint: detectedProviders.has("anthropic")
-        ? "✓ key detected — uses LLM for clustering (no embedding needed)"
-        : "requires ANTHROPIC_API_KEY",
+        ? "✓ key detected — LLM-direct clustering, RECOMMENDED for convention/principle extraction"
+        : "LLM-direct clustering, RECOMMENDED for convention/principle extraction",
     },
   ];
 
@@ -393,17 +433,17 @@ function generateConfig(opts: {
   provider: string;
   language: string;
   threshold: string;
+  clusteringStrategy: string;
   memoryFile: string;
   pathScopedDir: string;
   adrDir: string;
 }): string {
   const models = getDefaultModels(opts.provider);
 
-  return `version: 1
+  return `version: 2
 
 language:
   preferredOutput: ${opts.language}
-  fallback: en
 
 memoryTargets:
   agents:
@@ -426,7 +466,7 @@ memoryTargets:
 #   - sourcery-ai[bot]
 
 thresholds:
-  minOccurrences: 3
+  minOccurrences: 2
   windowDays: 60
   similarityThreshold: ${opts.threshold}
   minConfidence: 0.75
@@ -434,35 +474,61 @@ thresholds:
 llm:
   provider: ${opts.provider}
   classificationModel: ${models.classification}
+  clusteringModel: ${models.clustering}
+  clusteringStrategy: ${opts.clusteringStrategy}
   draftingModel: ${models.drafting}
   embeddingModel: ${models.embedding}
+
+privacy:
+  redactSecrets: true
+  sendDiffHunksToLLM: false
 `;
 }
 
 function getDefaultModels(provider: string) {
   switch (provider) {
     case "openai":
+      // gpt-4.1-mini / gpt-4.1-nano are non-reasoning models — they produce
+      // structured output (zod-validated JSON) reliably and cheaply. The
+      // gpt-5.x family always reasons internally before answering, which
+      // destabilizes strict structured-output enforcement on our cluster
+      // schema. draft uses nano (~$0.10/M in) since text generation is
+      // mechanical; classify and cluster use mini (~$0.40/M in) for the
+      // slightly stronger judgment they need on routing decisions.
       return {
         classification: "gpt-4.1-mini",
-        drafting: "gpt-4.1-mini",
+        clustering: "gpt-4.1-mini",
+        drafting: "gpt-4.1-nano",
         embedding: "text-embedding-3-small",
       };
     case "anthropic":
+      // All-haiku default — haiku 4.5 handles our routing/clustering/drafting
+      // workload competently and is 3x cheaper input / 3x cheaper output than
+      // sonnet. Promoting cluster routing patterns isn't a deep-reasoning task;
+      // users who need sharper judgment can opt into sonnet/opus per .promote.yml.
       return {
-        classification: "claude-sonnet-4-5",
+        classification: "claude-haiku-4-5",
+        clustering: "claude-haiku-4-5",
         drafting: "claude-haiku-4-5",
         embedding: "text-embedding-3-small",
       };
     case "google":
+      // 'latest' aliases auto-track Google's current generation. All-flash-lite
+      // (~\$0.25/\$1.50 per M) is enough for the routing-style decisions this
+      // tool makes; Gemini 3 Flash adds capability that isn't needed here.
+      // Users wanting sharper output can swap to gemini-flash-latest per
+      // .promote.yml.
       return {
-        classification: "gemini-2.5-flash",
-        drafting: "gemini-2.5-flash",
+        classification: "gemini-flash-lite-latest",
+        clustering: "gemini-flash-lite-latest",
+        drafting: "gemini-flash-lite-latest",
         embedding: "gemini-embedding-001",
       };
     default:
       return {
         classification: "gpt-4.1-mini",
-        drafting: "gpt-4.1-mini",
+        clustering: "gpt-4.1-mini",
+        drafting: "gpt-4.1-nano",
         embedding: "text-embedding-3-small",
       };
   }

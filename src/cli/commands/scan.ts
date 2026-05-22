@@ -4,7 +4,7 @@ import { execSync } from "node:child_process";
 import { resolve } from "node:path";
 import chalk from "chalk";
 import { createOctokit, parseRepoRef } from "../../ingest/github-client.js";
-import { fetchReviewComments, computeSinceDate } from "../../ingest/comment-fetcher.js";
+import { fetchReviewComments, fetchPrConversationComments, computeSinceDate } from "../../ingest/comment-fetcher.js";
 import { filterAIReviewComments } from "../../filter/ai-reviewer-filter.js";
 import { filterNoise } from "../../filter/noise-filter.js";
 import { normalizeComments } from "../../normalize/normalizer.js";
@@ -17,13 +17,24 @@ import { resolveModels } from "../../llm/provider.js";
 import { CostTracker } from "../../llm/cost-tracker.js";
 import { loadConfig } from "../../core/config.js";
 import { initDatabase } from "../../storage/db.js";
-import { upsertComments } from "../../storage/repositories.js";
+import {
+  upsertComments,
+  resetExpiredSnoozes,
+  upsertCandidateRecord,
+  listCandidates,
+  saveCluster,
+  updateCandidateStatus,
+} from "../../storage/repositories.js";
+import { buildReplyContextMap } from "../../ingest/reply-context.js";
+import { aggregateHumanSignal } from "../../core/human-signal.js";
 import type { PromotionCandidate, AnalysisStats } from "../../core/types.js";
 import * as out from "../output.js";
 import { mascotSays, mascotHappy } from "../mascot.js";
 import { createTimedSpinner, getClassifyMessage, getDraftMessage, getClusterMessage } from "../thinking.js";
 import { runInteractiveReview } from "./review.js";
 import { applyPromotion } from "./promote.js";
+import { NAME, VERSION } from "../../version.js";
+import { notifyIfOutdated } from "../update-check.js";
 
 const CLOSING_QUOTES: Record<string, string[]> = {
   en: [
@@ -45,11 +56,39 @@ export type ScanOptions = {
   since?: string;
   config?: string;
   out?: string;
+  mode?: string;
   verbose?: boolean;
 };
 
 export async function runScan(options: ScanOptions) {
+  const runStartedAt = Date.now();
+  const timings = {
+    fetchMs: 0,
+    normalizeMs: 0,
+    clusterMs: 0,
+    conversationFetchMs: 0,
+    replyContextMs: 0,
+    memoryScanMs: 0,
+    classifyDraftMs: 0,
+    totalMs: 0,
+  };
+
+  await notifyIfOutdated();
   const config = loadConfig(options.config);
+
+  // --mode overrides clusteringStrategy at runtime
+  if (options.mode) {
+    const mode = options.mode.toLowerCase();
+    if (mode === "quick") {
+      config.llm.clusteringStrategy = "embedding";
+    } else if (mode === "broad") {
+      config.llm.clusteringStrategy = "llm-direct";
+    } else {
+      out.error(`Invalid --mode: "${options.mode}". Use 'quick' or 'broad'.`);
+      process.exit(1);
+    }
+  }
+
   const repoStr = options.repo ?? detectCurrentRepo();
   const repo = parseRepoRef(repoStr);
   const sinceDays = options.since
@@ -58,18 +97,94 @@ export async function runScan(options: ScanOptions) {
   const sinceDate = computeSinceDate(sinceDays);
 
   mascotSays(`Scanning ${repo.fullName} (last ${sinceDays} days)`);
-  out.divider();
+  out.stat("Tool", `${NAME} v${VERSION}`);
+
+  // Validate the chosen clustering strategy is achievable on this provider.
+  // "quick" (embedding+HAC) needs an embedding model; Anthropic has none.
+  // If the user explicitly asked for quick on Anthropic, offer to switch
+  // provider to OpenAI for this run (if their key is set) before resolving
+  // models — running the scan first and erroring later would waste time.
+  if (
+    config.llm.clusteringStrategy === "embedding" &&
+    config.llm.provider === "anthropic"
+  ) {
+    out.warn(
+      `Provider 'anthropic' has no embedding API — 'quick' mode (embedding+HAC) is not supported there.`,
+    );
+
+    const hasOpenAiKey = !!process.env.OPENAI_API_KEY;
+    const choice = await p.select({
+      message: hasOpenAiKey
+        ? "OPENAI_API_KEY detected. Switch this scan to OpenAI to use 'quick' mode?"
+        : "OpenAI key not detected. How do you want to proceed?",
+      options: hasOpenAiKey
+        ? [
+            { value: "switch", label: "Switch to OpenAI for this scan (recommended)", hint: "uses OpenAI defaults: gpt-4.1-mini + gpt-4.1-nano" },
+            { value: "broad", label: "Stay on Anthropic and use 'broad' mode instead", hint: "LLM-direct clustering — Claude's natural strength" },
+            { value: "cancel", label: "Cancel" },
+          ]
+        : [
+            { value: "broad", label: "Use 'broad' mode on Anthropic (recommended)", hint: "LLM-direct clustering — Claude's natural strength" },
+            { value: "instructions", label: "Show how to set OPENAI_API_KEY" },
+            { value: "cancel", label: "Cancel" },
+          ],
+    });
+
+    if (p.isCancel(choice) || choice === "cancel") {
+      out.info("Cancelled.");
+      process.exit(130);
+    }
+    if (choice === "instructions") {
+      out.info("Set OPENAI_API_KEY in your environment, then re-run:");
+      out.info("  export OPENAI_API_KEY=sk-...");
+      out.info(`  promote scan --repo ${repo.fullName} --mode quick`);
+      process.exit(0);
+    }
+    if (choice === "broad") {
+      config.llm.clusteringStrategy = "llm-direct";
+      out.info("Continuing with 'broad' mode on Anthropic.");
+    }
+    if (choice === "switch") {
+      config.llm.provider = "openai";
+      config.llm.classificationModel = "gpt-4.1-mini";
+      config.llm.clusteringModel = "gpt-4.1-mini";
+      config.llm.draftingModel = "gpt-4.1-nano";
+      config.llm.embeddingModel = "text-embedding-3-small";
+      out.info("Switched to OpenAI for this scan.");
+    }
+  }
 
   const octokit = createOctokit();
   const models = resolveModels(config.llm);
   const costTracker = new CostTracker(config.llm.classificationModel);
 
+  const llmOnly = !models.embeddingModel;
+  const forcedLlmDirect = config.llm.clusteringStrategy === "llm-direct" && !!models.embeddingModel;
+  const effectiveCluster = config.llm.clusteringModel ?? config.llm.classificationModel;
+  const clusterDifferent = effectiveCluster !== config.llm.classificationModel;
+  const providerSuffix = llmOnly
+    ? " (LLM-direct clustering — no embedding API, llmRefine inactive)"
+    : forcedLlmDirect
+      ? " (LLM-direct clustering — forced via clusteringStrategy, llmRefine inactive)"
+      : " (embeddings + HAC + llmRefine)";
+  out.stat("Provider", `${config.llm.provider}${providerSuffix}`);
+  const embeddingActive = !llmOnly && !forcedLlmDirect;
+  const modelParts: string[] = [`${config.llm.classificationModel} (classify)`];
+  if (clusterDifferent || forcedLlmDirect) modelParts.push(`${effectiveCluster} (cluster)`);
+  modelParts.push(`${config.llm.draftingModel} (draft)`);
+  if (embeddingActive) modelParts.push(`${config.llm.embeddingModel} (embed)`);
+  out.stat("Models", modelParts.join(" + "));
+  out.stat("Output language", config.language.preferredOutput);
+  out.divider();
+
   // 1. Fetch
+  const fetchT0 = Date.now();
   const fetchSpinner = out.spinner("Fetching review comments...");
   const allComments = await fetchReviewComments(octokit, repo, sinceDate, (count) => {
     fetchSpinner.text = `Fetching review comments... ${chalk.dim(`(${count})`)}`;
   });
-  fetchSpinner.succeed(`Fetched ${allComments.length} review comments`);
+  timings.fetchMs = Date.now() - fetchT0;
+  fetchSpinner.succeed(`Fetched ${allComments.length} review comments ${chalk.dim(`(${out.fmtDuration(timings.fetchMs)})`)}`);
 
   if (allComments.length === 0) {
     mascotSays("No review comments found.");
@@ -94,37 +209,78 @@ export async function runScan(options: ScanOptions) {
   const { db } = initDatabase();
   upsertComments(db, allComments, repo.fullName);
 
+  // Re-activate snoozed candidates whose snooze period has expired
+  const reactivated = resetExpiredSnoozes(db, repo.fullName);
+  if (reactivated > 0) {
+    out.info(`${reactivated} snoozed candidate(s) reactivated (snooze period expired)`);
+  }
+
   // 4. Normalize
+  const normalizeT0 = Date.now();
   const normalizeSpinner = out.spinner("Normalizing...");
   const normalized = normalizeComments(kept);
-  normalizeSpinner.succeed(`Normalized ${normalized.length} comments`);
+  timings.normalizeMs = Date.now() - normalizeT0;
+  normalizeSpinner.succeed(`Normalized ${normalized.length} comments ${chalk.dim(`(${out.fmtDuration(timings.normalizeMs)})`)}`);
 
   const uniquePrs = new Set(normalized.map((c) => c.prNumber));
   out.stat("PRs scanned", uniquePrs.size);
 
   // 5. Pre-cluster
+  const clusterT0 = Date.now();
   const clusterSpinner = out.spinner("");
+  // When the cluster step reports real progress (LLM-direct path emits
+  // "[depth N] Batch X/Y..." lines), prefer that over the rotating mascot
+  // message — keeps the user informed during multi-minute scans.
+  let liveClusterMessage: string | null = null;
   const clusterTimer = createTimedSpinner(
     clusterSpinner,
-    getClusterMessage,
+    () => liveClusterMessage ?? getClusterMessage(),
     chalk.dim(`[clustering]`),
   );
   const { clusters, mode } = await preCluster({
     comments: normalized,
     embeddingModel: models.embeddingModel,
     classificationModel: models.classificationModel,
+    clusteringModel: models.clusteringModel,
+    clusteringStrategy: config.llm.clusteringStrategy,
     similarityThreshold: config.thresholds.similarityThreshold,
     costTracker,
-    onProgress: () => {},
+    onProgress: (msg) => {
+      liveClusterMessage = msg;
+    },
   });
   clusterTimer.stop();
+  timings.clusterMs = Date.now() - clusterT0;
   const modeLabel = mode === "llm" ? "LLM direct" : "embedding";
-  clusterSpinner.succeed(`Found ${clusters.length} clusters (${modeLabel}) ${chalk.dim(`(${clusterTimer.getElapsed()}s)`)}`);
+  clusterSpinner.succeed(`Found ${clusters.length} clusters (${modeLabel}) ${chalk.dim(`(${out.fmtDuration(timings.clusterMs)})`)}`);
 
+  // "Repeated" = total members >= minOccurrences. Cross-PR (members from 2+
+  // distinct PRs) is the higher-value signal for repository memory; within-PR
+  // (chatty bot in one review) is lower priority but still valid as duplicate
+  // evidence. Both are surfaced; the scope is shown per candidate so users can
+  // visually prioritize.
   const repeatedClusters = clusters.filter(
     (c) => c.members.length >= config.thresholds.minOccurrences,
   );
-  out.stat("Repeated clusters", `${repeatedClusters.length} (>= ${config.thresholds.minOccurrences} occurrences)`);
+  const crossPrCount = repeatedClusters.filter(
+    (c) => new Set(c.members.map((m) => m.prNumber)).size >= 2,
+  ).length;
+  const withinPrCount = repeatedClusters.length - crossPrCount;
+  out.stat(
+    "Repeated clusters",
+    `${repeatedClusters.length} (>= ${config.thresholds.minOccurrences} members)${
+      repeatedClusters.length > 0
+        ? chalk.dim(` · ${crossPrCount} cross-PR, ${withinPrCount} within-PR`)
+        : ""
+    }`,
+  );
+
+  // Sort: cross-PR clusters (higher-value signal) come first
+  repeatedClusters.sort((a, b) => {
+    const aPrs = new Set(a.members.map((m) => m.prNumber)).size;
+    const bPrs = new Set(b.members.map((m) => m.prNumber)).size;
+    return bPrs - aPrs;
+  });
 
   if (repeatedClusters.length === 0) {
     out.divider();
@@ -134,19 +290,99 @@ export async function runScan(options: ScanOptions) {
 
   out.divider();
 
-  // 6. Scan existing memory
-  const memSpinner = out.spinner("Scanning existing memory files...");
-  const memoryContext = await scanExistingMemory(octokit, repo, config.memoryTargets);
-  memSpinner.succeed(
-    memoryContext.files.length > 0
-      ? `Found ${memoryContext.files.length} existing memory file(s)`
-      : "No existing memory files found",
+  // 6. Build reply context map (human replies + reactions on bot comments)
+  // Fetches both inline review-line replies and general PR conversation comments.
+  // General comments lack in_reply_to_id, so they're matched to specific bot
+  // comments via a per-PR LLM call (skipped when the PR has only one bot comment).
+  const prNumbers = new Set(ai.map((c) => c.prNumber));
+  const convT0 = Date.now();
+  const convSpinner = out.spinner("Fetching PR conversation comments...");
+  let generalHuman: typeof ai = [];
+  try {
+    generalHuman = await fetchPrConversationComments(octokit, repo, prNumbers, sinceDate, config.aiReviewers);
+    timings.conversationFetchMs = Date.now() - convT0;
+    convSpinner.succeed(`Fetched ${generalHuman.length} human PR conversation comment(s) ${chalk.dim(`(${out.fmtDuration(timings.conversationFetchMs)})`)}`);
+  } catch (err) {
+    timings.conversationFetchMs = Date.now() - convT0;
+    convSpinner.fail(`Failed to fetch PR conversation comments: ${err instanceof Error ? err.message : String(err)}`);
+  }
+
+  const matchT0 = Date.now();
+  const matchSpinner = out.spinner("Analyzing human reactions...");
+  let replyContextMap: Awaited<ReturnType<typeof buildReplyContextMap>>;
+  try {
+    replyContextMap = await buildReplyContextMap(
+      ai,
+      human,
+      models.classificationModel,
+      costTracker,
+      generalHuman,
+    );
+    timings.replyContextMs = Date.now() - matchT0;
+    matchSpinner.succeed(`Analyzed human reactions ${chalk.dim(`(${out.fmtDuration(timings.replyContextMs)})`)}`);
+  } catch (err) {
+    timings.replyContextMs = Date.now() - matchT0;
+    replyContextMap = new Map();
+    matchSpinner.fail(`Failed to analyze human reactions: ${err instanceof Error ? err.message : String(err)}`);
+  }
+
+  // Coverage diagnostic: how many bot comments actually received a human reply
+  // or reaction? Low coverage explains sparse Human signal blocks in the digest.
+  let botsWithReply = 0;
+  let botsWithReaction = 0;
+  for (const ctx of replyContextMap.values()) {
+    if (ctx.replies.length > 0) botsWithReply++;
+    if (ctx.reactions.plusOne + ctx.reactions.minusOne > 0) botsWithReaction++;
+  }
+  out.stat(
+    "Human signal coverage",
+    `${botsWithReply} replies + ${botsWithReaction} reactions / ${ai.length} bot comments` +
+      (botsWithReply + botsWithReaction === 0
+        ? chalk.dim(" (no human engagement on the fetched comments)")
+        : ""),
   );
 
-  // 7. Classify + Draft (parallel with ordered output)
+  // 7. Scan existing memory
+  const memT0 = Date.now();
+  const memSpinner = out.spinner("Scanning existing memory files...");
+  const memoryContext = await scanExistingMemory(octokit, repo, config.memoryTargets);
+  timings.memoryScanMs = Date.now() - memT0;
+  const memBase = memoryContext.files.length > 0
+    ? `Found ${memoryContext.files.length} existing memory file(s)`
+    : "No existing memory files found";
+  memSpinner.succeed(`${memBase} ${chalk.dim(`(${out.fmtDuration(timings.memoryScanMs)})`)}`);
+
+  // 8. Pre-assign stable candidate IDs from SQLite
+  // Same cluster fingerprint → same ID across scans. New clusters get max+1.
+  const allExisting = listCandidates(db, repo.fullName);
+  const fingerprintToRecord = new Map(
+    allExisting
+      .filter((r) => r.clusterFingerprint)
+      .map((r) => [r.clusterFingerprint!, r]),
+  );
+  let maxNum = 0;
+  for (const r of allExisting) {
+    const m = r.id.match(/candidate_(\d+)/);
+    if (m) maxNum = Math.max(maxNum, parseInt(m[1]));
+  }
+  let nextNewNum = maxNum + 1;
+
+  const preAssignedIds = new Map<string, string>(); // fingerprint → candidate ID
+  for (const cluster of repeatedClusters) {
+    const existing = fingerprintToRecord.get(cluster.fingerprint);
+    if (existing?.status === "promoted" || existing?.status === "ignored") continue;
+    preAssignedIds.set(
+      cluster.fingerprint,
+      existing?.id ?? `candidate_${String(nextNewNum++).padStart(3, "0")}`,
+    );
+  }
+
+  // 9. Classify + Draft (parallel with ordered output)
+  const classifyT0 = Date.now();
   const CONCURRENCY = 3;
   const total = repeatedClusters.length;
   const candidates: PromotionCandidate[] = [];
+  let failedClusters = 0;
 
   type ClusterResult = {
     index: number;
@@ -157,12 +393,9 @@ export async function runScan(options: ScanOptions) {
     confidence?: number;
   };
 
-  // Buffer for ordered output: results[i] is set when task i completes
   const resultBuffer: (ClusterResult | undefined)[] = new Array(total);
   let nextToPrint = 0;
-  let candidateNum = 1;
 
-  // Spinner for the currently processing items
   const activeSpinner = out.spinner("");
   const activeTimer = createTimedSpinner(
     activeSpinner,
@@ -170,102 +403,119 @@ export async function runScan(options: ScanOptions) {
     chalk.dim(`[1/${total}]`),
   );
 
-  // Flush all consecutive completed results from the buffer
   const flushBuffer = () => {
     while (nextToPrint < total && resultBuffer[nextToPrint] !== undefined) {
       const r = resultBuffer[nextToPrint]!;
       const progress = chalk.dim(`[${r.index + 1}/${total}]`);
-
-      // Stop spinner temporarily to print
       activeSpinner.clear();
 
       const cols = process.stdout.columns || 80;
       const prefix = `  ${progress} `;
 
       if (r.skipped) {
-        const label = `skip — `;
-        const maxSummary = cols - prefix.length - label.length - 1;
-        const summary = truncate(r.summary, maxSummary);
-        console.log(`${prefix}${chalk.dim("skip")} — ${chalk.dim(summary)}`);
+        const maxSummary = cols - prefix.length - 8;
+        console.log(`${prefix}${chalk.dim("skip")} — ${chalk.dim(truncate(r.summary, maxSummary))}`);
       } else if (r.candidate) {
-        r.candidate.id = `candidate_${String(candidateNum).padStart(3, "0")}`;
         candidates.push(r.candidate);
         const badge = `[${r.target}] `;
         const suffix = ` (${r.confidence?.toFixed(2)})`;
         const maxSummary = cols - prefix.length - badge.length - suffix.length - 1;
-        const summary = truncate(r.summary, maxSummary);
-        console.log(`${prefix}${chalk.cyan(`[${r.target}]`)} ${summary} ${chalk.dim(`(${r.confidence?.toFixed(2)})`)}`);
-        candidateNum++;
+        console.log(`${prefix}${chalk.cyan(`[${r.target}]`)} ${truncate(r.summary, maxSummary)} ${chalk.dim(`(${r.confidence?.toFixed(2)})`)}`);
       }
 
       nextToPrint++;
     }
-
-    // Resume spinner if there's still work
-    if (nextToPrint < total) {
-      activeSpinner.start();
-    }
+    if (nextToPrint < total) activeSpinner.start();
   };
 
   const processCluster = async (cluster: typeof repeatedClusters[0], index: number): Promise<void> => {
-    const decision = await classifyCluster({
-      cluster,
-      model: models.classificationModel,
-      memoryContext,
-      costTracker,
-      outputLanguage: config.language.preferredOutput,
-    });
-
-    if (!decision.clusterValid || decision.target === "none" || decision.target === "pr_only") {
-      resultBuffer[index] = { index, candidate: null, summary: decision.summary ?? "not promotable", skipped: true };
+    const existing = fingerprintToRecord.get(cluster.fingerprint);
+    if (existing?.status === "promoted" || existing?.status === "ignored") {
+      resultBuffer[index] = { index, candidate: null, summary: existing.summary, skipped: true };
       flushBuffer();
       return;
     }
 
-    if (decision.confidence < config.thresholds.minConfidence) {
-      resultBuffer[index] = { index, candidate: null, summary: decision.summary ?? "", skipped: true };
-      flushBuffer();
-      return;
-    }
+    try {
+      const humanSignal = aggregateHumanSignal(cluster, replyContextMap);
 
-    const draft = await generateDraft({
-      cluster,
-      decision,
-      model: models.draftingModel,
-      costTracker,
-      preferredLanguage: config.language.preferredOutput,
-    });
+      const decision = await classifyCluster({
+        cluster,
+        model: models.classificationModel,
+        memoryContext,
+        costTracker,
+        outputLanguage: config.language.preferredOutput,
+        redact: config.privacy.redactSecrets,
+        humanSignal,
+        includeDiffHunks: config.privacy.sendDiffHunksToLLM,
+      });
 
-    resultBuffer[index] = {
-      index,
-      candidate: {
-        id: "",
-        repo: repo.fullName,
-        clusterId: cluster.id,
+      if (!decision.clusterValid || decision.target === "none" || decision.target === "pr_only") {
+        resultBuffer[index] = { index, candidate: null, summary: decision.summary ?? "not promotable", skipped: true };
+        flushBuffer();
+        return;
+      }
+
+      if (decision.confidence < config.thresholds.minConfidence) {
+        resultBuffer[index] = { index, candidate: null, summary: decision.summary ?? "", skipped: true };
+        flushBuffer();
+        return;
+      }
+
+      const draft = await generateDraft({
+        cluster,
+        decision,
+        model: models.draftingModel,
+        costTracker,
+        preferredLanguage: config.language.preferredOutput,
+        redact: config.privacy.redactSecrets,
+      });
+
+      const candidateId = preAssignedIds.get(cluster.fingerprint) ?? `candidate_${String(nextNewNum++).padStart(3, "0")}`;
+
+      resultBuffer[index] = {
+        index,
+        candidate: {
+          id: candidateId,
+          repo: repo.fullName,
+          clusterId: cluster.id,
+          clusterFingerprint: cluster.fingerprint,
+          summary: decision.summary,
+          target: decision.target,
+          confidence: decision.confidence,
+          suggestedFile: decision.suggestedFile ?? draft.targetFile,
+          pathScope: decision.pathScope,
+          draft,
+          reasoning: decision.reason,
+          alternatives: decision.alternatives,
+          occurrences: cluster.members.map((m) => ({
+            prNumber: m.prNumber,
+            path: m.filePath,
+            url: m.htmlUrl,
+            excerpt: m.normalizedBody.slice(0, 150),
+            authorLogin: m.authorLogin,
+            createdAt: m.createdAt,
+          })),
+          status: decision.needsHumanDecision ? "needs_human_decision" as const : "candidate" as const,
+          humanSignal,
+        },
         summary: decision.summary,
+        skipped: false,
         target: decision.target,
         confidence: decision.confidence,
-        suggestedFile: decision.suggestedFile ?? draft.targetFile,
-        pathScope: decision.pathScope,
-        draft,
-        reasoning: decision.reason,
-        alternatives: decision.alternatives,
-        occurrences: cluster.members.map((m) => ({
-          prNumber: m.prNumber,
-          path: m.filePath,
-          url: m.htmlUrl,
-          excerpt: m.normalizedBody.slice(0, 150),
-          authorLogin: m.authorLogin,
-          createdAt: m.createdAt,
-        })),
-        status: decision.needsHumanDecision ? "needs_human_decision" as const : "candidate" as const,
-      },
-      summary: decision.summary,
-      skipped: false,
-      target: decision.target,
-      confidence: decision.confidence,
-    };
-    flushBuffer();
+      };
+      flushBuffer();
+    } catch (err) {
+      failedClusters++;
+      const msg = err instanceof Error ? err.message : String(err);
+      resultBuffer[index] = {
+        index,
+        candidate: null,
+        summary: `failed: ${msg.slice(0, 80)}`,
+        skipped: true,
+      };
+      flushBuffer();
+    }
   };
 
   // Run with concurrency limit
@@ -297,9 +547,56 @@ export async function runScan(options: ScanOptions) {
     running.push(runNext());
   }
   await Promise.all(running);
+  timings.classifyDraftMs = Date.now() - classifyT0;
 
   activeTimer.stop();
   activeSpinner.stop();
+
+  out.success(
+    `Classified + drafted ${total} cluster(s): ${candidates.length} promoted${
+      failedClusters > 0 ? `, ${failedClusters} failed` : ""
+    } ${chalk.dim(`(${out.fmtDuration(timings.classifyDraftMs)})`)}`,
+  );
+
+  if (failedClusters > 0) {
+    out.warn(`${failedClusters} cluster(s) failed during classify/draft and were skipped — see summary line above.`);
+  }
+
+  // Persist clusters + candidates to DB for cross-run dedup
+  // Clusters must be inserted first (candidates FK → clusters)
+  const clusterMap = new Map(repeatedClusters.map((c) => [c.id, c]));
+  for (const c of candidates) {
+    const cluster = clusterMap.get(c.clusterId);
+    if (cluster) {
+      saveCluster(
+        db,
+        cluster.id,
+        repo.fullName,
+        cluster.fingerprint,
+        cluster.representative.id,
+        cluster.members.length,
+        cluster.representativeEmbedding,
+      );
+    }
+  }
+  for (const c of candidates) {
+    upsertCandidateRecord(db, {
+      id: c.id,
+      repo: c.repo,
+      clusterId: c.clusterId,
+      clusterFingerprint: c.clusterFingerprint,
+      target: c.target,
+      confidence: c.confidence,
+      summary: c.summary,
+      reason: c.reasoning,
+      suggestedFile: c.suggestedFile,
+      pathScope: c.pathScope,
+      draftContent: c.draft.content,
+      alternativesJson: JSON.stringify(c.alternatives),
+      humanSignalJson: c.humanSignal ? JSON.stringify(c.humanSignal) : null,
+      status: c.status,
+    });
+  }
 
   out.divider();
 
@@ -307,6 +604,10 @@ export async function runScan(options: ScanOptions) {
   const cost = costTracker.getSummary();
   out.stat("Total tokens", cost.totalPromptTokens + cost.totalCompletionTokens);
   out.stat("Estimated cost", `$${cost.estimatedCostUSD}`);
+
+  // Total wall time (per-step durations already printed in each succeed line)
+  timings.totalMs = Date.now() - runStartedAt;
+  out.stat("Total time", out.fmtDuration(timings.totalMs));
 
   out.divider();
 
@@ -323,13 +624,23 @@ export async function runScan(options: ScanOptions) {
     clustersFound: clusters.length,
     repeatedClusters: repeatedClusters.length,
     candidatesGenerated: candidates.length,
+    failedClusters,
     prCount: uniquePrs.size,
-    embeddingTokens: cost.totalPromptTokens,
-    classificationTokens: cost.totalCompletionTokens,
+    promptTokens: cost.totalPromptTokens,
+    completionTokens: cost.totalCompletionTokens,
     estimatedCostUSD: cost.estimatedCostUSD,
+    timings,
   };
 
-  const digest = renderDigest(candidates, stats, repo.fullName, config.language.preferredOutput);
+  const digest = renderDigest(
+    candidates,
+    stats,
+    repo.fullName,
+    config.language.preferredOutput,
+    config,
+    !llmOnly,
+    sinceDays,
+  );
   const digestDir = resolve(process.cwd(), ".promote", "digests");
   if (!existsSync(digestDir)) {
     mkdirSync(digestDir, { recursive: true });
@@ -376,7 +687,11 @@ export async function runScan(options: ScanOptions) {
       ],
     });
 
-    if (p.isCancel(remoteAction) || remoteAction === "digest-only") {
+    if (p.isCancel(remoteAction)) {
+      out.info("Cancelled.");
+      process.exit(130);
+    }
+    if (remoteAction === "digest-only") {
       out.info(`Digest saved: ${chalk.bold(digestPath)}`);
       out.info("Clone the target repo and run promote there to apply changes.");
       return;
@@ -391,87 +706,28 @@ export async function runScan(options: ScanOptions) {
     ],
   });
 
-  if (p.isCancel(reviewNow) || reviewNow === "later") {
+  if (p.isCancel(reviewNow)) {
+    out.info("Cancelled.");
+    process.exit(130);
+  }
+  if (reviewNow === "later") {
     out.info(`Digest: ${chalk.bold(digestPath)}`);
-    out.info(`Promote later: ${chalk.dim("promote promote candidate_001 --target agents --write")}`);
+    out.info(`Promote later: ${chalk.dim("promote candidate_001")}  ${chalk.dim("# or: promote review")}`);
     return;
   }
 
-  // Interactive review
-  const actions = await runInteractiveReview(candidates);
-
-  // Apply promotions
-  let promoted = 0;
-  let ignored = 0;
-  let skipped = 0;
-
-  for (const action of actions) {
-    const candidate = candidates.find((c) => c.id === action.candidateId);
-    if (!candidate) continue;
-
-    switch (action.action) {
-      case "promote":
-        await applyPromotion(candidate, candidate.target);
-        promoted++;
-        break;
-      case "change-target":
-        if (action.newTarget) {
-          await applyPromotion(candidate, action.newTarget);
-          promoted++;
-        }
-        break;
-      case "ignore":
-        ignored++;
-        break;
-      case "skip":
-        skipped++;
-        break;
-    }
-  }
+  // Interactive review — each approval writes immediately
+  const { promoted, skipped } = await runInteractiveReview(
+    candidates,
+    async (candidate, target) => {
+      await applyPromotion(candidate, target);
+      updateCandidateStatus(db, candidate.id, "promoted");
+    },
+  );
 
   out.divider();
 
-  if (promoted > 0) {
-    mascotHappy(`Done! ${promoted} candidate(s) promoted.`);
-    console.log();
-
-    // Show what was written where
-    const promotedCandidates = candidates.filter((c) =>
-      actions.some((a) => a.candidateId === c.id && (a.action === "promote" || a.action === "change-target")),
-    );
-
-    console.log(chalk.bold("  Files modified:"));
-    const fileGroups: Record<string, string[]> = {};
-    for (const c of promotedCandidates) {
-      const file = c.suggestedFile ?? c.target;
-      if (!fileGroups[file]) fileGroups[file] = [];
-      fileGroups[file].push(c.summary);
-    }
-    for (const [file, summaries] of Object.entries(fileGroups)) {
-      console.log(`    ${chalk.cyan(file)}`);
-      for (const s of summaries) {
-        console.log(chalk.dim(`      + ${s}`));
-      }
-    }
-    console.log();
-
-    // Preview first promoted file
-    const firstFile = Object.keys(fileGroups)[0];
-    if (firstFile) {
-      const fullPath = resolve(process.cwd(), firstFile);
-      if (existsSync(fullPath)) {
-        const content = readFileSync(fullPath, "utf-8");
-        const lines = content.split("\n").slice(-10);
-        console.log(chalk.dim(`  Preview (${firstFile}, last 10 lines):`));
-        for (const line of lines) {
-          console.log(chalk.dim(`    ${line}`));
-        }
-        console.log();
-      }
-    }
-  }
-
-  if (skipped > 0) out.info(`${skipped} candidate(s) skipped for later.`);
+  if (skipped > 0) out.info(`${skipped} candidate(s) skipped. Review later: ${chalk.dim("promote review")}`);
   out.info(`Full digest: ${chalk.bold(digestPath)}`);
 
   if (promoted > 0) {
@@ -482,6 +738,7 @@ export async function runScan(options: ScanOptions) {
       console.log(chalk.dim.italic(`  ${line}`));
     }
     console.log();
+    mascotHappy(`Done! ${promoted} candidate(s) promoted.`);
     out.info("Review the modified files, then commit when ready.");
   }
 }

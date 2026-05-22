@@ -1,8 +1,10 @@
 import { generateText } from "ai";
+import { seedIfSupported, temperatureIfSupported, llmProviderOptions } from "../llm/provider.js";
 import type { LanguageModel } from "ai";
 import type { Cluster, RoutingDecision, DraftPromotion } from "../core/types.js";
 import type { CostTracker } from "../llm/cost-tracker.js";
 import { sanitizeUnicode } from "../normalize/sanitize.js";
+import { redactSecrets } from "../normalize/redact.js";
 
 const DRAFT_PROMPTS: Record<string, string> = {
   agents: `Generate a concise section for an AI instruction file (AGENTS.md or similar).
@@ -54,18 +56,25 @@ export async function generateDraft(input: {
   model: LanguageModel;
   costTracker: CostTracker;
   preferredLanguage: string;
+  redact?: boolean;
 }): Promise<DraftPromotion> {
-  const { cluster, decision, model, costTracker, preferredLanguage } = input;
+  const { cluster, decision, model, costTracker, preferredLanguage, redact = true } = input;
 
   const templatePrompt = DRAFT_PROMPTS[decision.target] ?? DRAFT_PROMPTS.agents;
 
   const examples = cluster.members
     .slice(0, 3)
-    .map((m) => sanitizeUnicode(m.normalizedBody.slice(0, 200)))
+    .map((m) => {
+      const text = sanitizeUnicode(m.normalizedBody.slice(0, 200));
+      return redact ? redactSecrets(text) : text;
+    })
     .join("\n---\n");
 
   const { text, usage } = await generateText({
     model,
+    providerOptions: llmProviderOptions(model),
+    ...temperatureIfSupported(model),
+    ...seedIfSupported(model),
     system: templatePrompt,
     prompt: `Based on these repeated review comments, generate the appropriate content.
 
