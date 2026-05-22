@@ -107,7 +107,7 @@ promote init
 promote scan --since 30d
 ```
 
-**3. Review.** Approve, ignore, or snooze each candidate — approved ones land in your chosen target file immediately.
+**3. Review.** Walk through each candidate — promote or skip per item. Approved ones land in your chosen target file immediately.
 
 ```
 ─── Candidate 1/7 ───
@@ -123,6 +123,30 @@ Occurrences 3 across 2 PRs
 > Show full patch
 > Skip
 ```
+
+After the candidates, if anything was filtered out during classify you can browse those too, and any candidates you skipped can be appended to the digest for team review:
+
+```
+Also walk through 4 skipped item(s)?
+> Walk through them one by one
+> Skip all
+
+─── Skipped 1/4 ───
+
+Tests should import vitest helpers explicitly
+
+Reason      below confidence threshold
+Target      agents
+Confidence  0.62
+Detail      Pattern only appeared in 2 PRs; below minConfidence threshold
+
+> Next
+> Skip remaining
+
+Add 2 skipped candidate(s) to digest for team review? (Y/n)
+```
+
+For permanent dismissal or deferral outside the interactive flow, use `promote ignore <id>` or `promote snooze <id>` directly.
 
 BYOK — you bring your own API key. promote never proxies through a server.
 
