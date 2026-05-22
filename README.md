@@ -9,6 +9,7 @@
   <a href="#how-it-works">How</a> ·
   <a href="#quick-start">Quick start</a> ·
   <a href="#what-makes-it-different">Features</a> ·
+  <a href="#cost--mode-trade-off">Cost</a> ·
   <a href="#cli-reference">CLI</a> ·
   <a href="#roadmap">Roadmap</a>
 </p>
@@ -144,6 +145,30 @@ Output is localized per `language.preferredOutput` in `.promote.yml` (en / ko / 
 - **Evidence trail.** Every promoted rule links back to the PR comments it came from — auditable, not vibes.
 - **Stable candidate IDs.** Same pattern keeps the same ID across rescans, so deferred decisions don't get lost on the next run.
 - **Secret redaction.** AWS keys, tokens, JWTs stripped before any LLM call.
+
+<br />
+
+## Cost & mode trade-off
+
+Measured on trpc/trpc, 120-day window, 380 actionable AI comments:
+
+| Mode + provider                        | Candidates | Cost    | Wall time | Output style                                  |
+| -------------------------------------- | ---------- | ------- | --------- | --------------------------------------------- |
+| OpenAI `quick` (gpt-4.1-mini + nano)   | **24**     | $0.07   | 2m 14s    | Narrow, file-specific                         |
+| OpenAI `broad` (gpt-4.1-mini cluster)  | 8          | $0.10   | 2m 39s    | Core conventions only — subset of Anthropic   |
+| **Anthropic `broad` (Haiku 4.5)**      | **21**     | $0.47   | 8m 17s    | **Convention / principle / ADR mix**          |
+
+Picking a mode by cadence:
+
+| Cadence                    | Recommended                                       | Why                                                          |
+| -------------------------- | ------------------------------------------------- | ------------------------------------------------------------ |
+| **Weekly / biweekly**      | OpenAI `quick`                                    | Cheap, fast, catches narrow code patterns as they emerge     |
+| **Monthly**                | Anthropic `broad`                                 | Higher cost but extracts conventions worth memorializing     |
+| **Quarterly / sprint-end** | Anthropic `broad` + optional `--mode quick` follow-up | Combined coverage: principles from broad, code-level from quick |
+
+No Anthropic key? OpenAI `broad` is the "budget" alternative — reliably catches the 6–8 core repo-wide conventions at ~5× lower cost than Anthropic broad, though without the full depth (20+ conventions including ADR-worthy decisions).
+
+Full breakdown with examples from each mode → [docs/clustering.md](docs/clustering.md).
 
 <br />
 

@@ -27,11 +27,11 @@ import {
 } from "../../storage/repositories.js";
 import { buildReplyContextMap } from "../../ingest/reply-context.js";
 import { aggregateHumanSignal } from "../../core/human-signal.js";
-import type { PromotionCandidate, AnalysisStats } from "../../core/types.js";
+import type { PromotionCandidate, AnalysisStats, SkipReason, SkippedItem } from "../../core/types.js";
 import * as out from "../output.js";
 import { mascotSays, mascotHappy } from "../mascot.js";
 import { createTimedSpinner, getClassifyMessage, getDraftMessage, getClusterMessage } from "../thinking.js";
-import { runInteractiveReview } from "./review.js";
+import { runInteractiveReview, runSkippedReview } from "./review.js";
 import { applyPromotion } from "./promote.js";
 import { NAME, VERSION } from "../../version.js";
 import { notifyIfOutdated } from "../update-check.js";
@@ -382,6 +382,7 @@ export async function runScan(options: ScanOptions) {
   const CONCURRENCY = 3;
   const total = repeatedClusters.length;
   const candidates: PromotionCandidate[] = [];
+  const filterSkipped: SkippedItem[] = [];
   let failedClusters = 0;
 
   type ClusterResult = {
@@ -391,6 +392,9 @@ export async function runScan(options: ScanOptions) {
     skipped: boolean;
     target?: string;
     confidence?: number;
+    reason?: SkipReason;
+    detail?: string;
+    clusterFingerprint?: string;
   };
 
   const resultBuffer: (ClusterResult | undefined)[] = new Array(total);
@@ -415,6 +419,16 @@ export async function runScan(options: ScanOptions) {
       if (r.skipped) {
         const maxSummary = cols - prefix.length - 8;
         console.log(`${prefix}${chalk.dim("skip")} — ${chalk.dim(truncate(r.summary, maxSummary))}`);
+        if (r.reason) {
+          filterSkipped.push({
+            summary: r.summary,
+            reason: r.reason,
+            target: r.target,
+            confidence: r.confidence,
+            clusterFingerprint: r.clusterFingerprint,
+            detail: r.detail,
+          });
+        }
       } else if (r.candidate) {
         candidates.push(r.candidate);
         const badge = `[${r.target}] `;
@@ -431,7 +445,14 @@ export async function runScan(options: ScanOptions) {
   const processCluster = async (cluster: typeof repeatedClusters[0], index: number): Promise<void> => {
     const existing = fingerprintToRecord.get(cluster.fingerprint);
     if (existing?.status === "promoted" || existing?.status === "ignored") {
-      resultBuffer[index] = { index, candidate: null, summary: existing.summary, skipped: true };
+      resultBuffer[index] = {
+        index,
+        candidate: null,
+        summary: existing.summary,
+        skipped: true,
+        reason: existing.status === "promoted" ? "already-promoted" : "already-ignored",
+        clusterFingerprint: cluster.fingerprint,
+      };
       flushBuffer();
       return;
     }
@@ -451,13 +472,33 @@ export async function runScan(options: ScanOptions) {
       });
 
       if (!decision.clusterValid || decision.target === "none" || decision.target === "pr_only") {
-        resultBuffer[index] = { index, candidate: null, summary: decision.summary ?? "not promotable", skipped: true };
+        resultBuffer[index] = {
+          index,
+          candidate: null,
+          summary: decision.summary ?? "not promotable",
+          skipped: true,
+          reason: "not-promotable",
+          target: decision.target,
+          confidence: decision.confidence,
+          clusterFingerprint: cluster.fingerprint,
+          detail: decision.reason,
+        };
         flushBuffer();
         return;
       }
 
       if (decision.confidence < config.thresholds.minConfidence) {
-        resultBuffer[index] = { index, candidate: null, summary: decision.summary ?? "", skipped: true };
+        resultBuffer[index] = {
+          index,
+          candidate: null,
+          summary: decision.summary ?? "",
+          skipped: true,
+          reason: "low-confidence",
+          target: decision.target,
+          confidence: decision.confidence,
+          clusterFingerprint: cluster.fingerprint,
+          detail: decision.reason,
+        };
         flushBuffer();
         return;
       }
@@ -513,6 +554,9 @@ export async function runScan(options: ScanOptions) {
         candidate: null,
         summary: `failed: ${msg.slice(0, 80)}`,
         skipped: true,
+        reason: "classify-failed",
+        detail: msg,
+        clusterFingerprint: cluster.fingerprint,
       };
       flushBuffer();
     }
@@ -611,12 +655,7 @@ export async function runScan(options: ScanOptions) {
 
   out.divider();
 
-  if (candidates.length === 0) {
-    mascotSays("All clusters were filtered out. Nothing to promote.");
-    return;
-  }
-
-  // Write digest
+  // Build stats and digest path (needed by both 0-candidate and normal paths)
   const stats: AnalysisStats = {
     totalComments: allComments.length,
     aiComments: ai.length,
@@ -632,6 +671,66 @@ export async function runScan(options: ScanOptions) {
     timings,
   };
 
+  const digestDir = resolve(process.cwd(), ".promote", "digests");
+  if (!existsSync(digestDir)) {
+    mkdirSync(digestDir, { recursive: true });
+  }
+  const date = new Date().toISOString().split("T")[0];
+  const digestPath = options.out ?? resolve(digestDir, `${date}.md`);
+
+  // Branch A: nothing to show
+  if (candidates.length === 0 && filterSkipped.length === 0) {
+    mascotSays("All clusters were filtered out. Nothing to promote.");
+    return;
+  }
+
+  // Branch B: zero candidates but filter-skip exists
+  if (candidates.length === 0) {
+    mascotSays(
+      `No promotion candidates, but ${filterSkipped.length} item(s) were filtered out.`,
+    );
+    console.log();
+
+    const viewSkipped = await p.confirm({
+      message: `View ${filterSkipped.length} filtered item(s) now?`,
+      initialValue: true,
+    });
+    if (p.isCancel(viewSkipped)) {
+      out.info("Cancelled.");
+      process.exit(130);
+    }
+    if (viewSkipped) {
+      await runSkippedReview(filterSkipped);
+    }
+
+    const saveDigest = await p.confirm({
+      message: "Save skip digest?",
+      initialValue: true,
+    });
+    if (p.isCancel(saveDigest)) {
+      out.info("Cancelled.");
+      process.exit(130);
+    }
+    if (saveDigest) {
+      const digest = renderDigest(
+        candidates,
+        stats,
+        repo.fullName,
+        config.language.preferredOutput,
+        config,
+        !llmOnly,
+        sinceDays,
+        { filterSkipped },
+      );
+      writeFileSync(digestPath, digest, "utf-8");
+      out.success(`Skip digest written to ${digestPath}`);
+    } else {
+      out.info("Skip digest not saved.");
+    }
+    return;
+  }
+
+  // Branch C: candidates > 0 — write digest with filter-skip appendix (always)
   const digest = renderDigest(
     candidates,
     stats,
@@ -640,14 +739,8 @@ export async function runScan(options: ScanOptions) {
     config,
     !llmOnly,
     sinceDays,
+    filterSkipped.length > 0 ? { filterSkipped } : undefined,
   );
-  const digestDir = resolve(process.cwd(), ".promote", "digests");
-  if (!existsSync(digestDir)) {
-    mkdirSync(digestDir, { recursive: true });
-  }
-
-  const date = new Date().toISOString().split("T")[0];
-  const digestPath = options.out ?? resolve(digestDir, `${date}.md`);
   writeFileSync(digestPath, digest, "utf-8");
 
   mascotHappy(`${candidates.length} candidate(s) found!`);
@@ -716,19 +809,47 @@ export async function runScan(options: ScanOptions) {
     return;
   }
 
-  // Interactive review — each approval writes immediately
-  const { promoted, skipped } = await runInteractiveReview(
+  // Interactive review — each approval writes immediately.
+  // If filter-skipped exists, runInteractiveReview will ask after candidates
+  // whether to walk through them too.
+  const { promoted, skipped, userSkippedCandidates } = await runInteractiveReview(
     candidates,
     async (candidate, target) => {
       await applyPromotion(candidate, target);
       updateCandidateStatus(db, candidate.id, "promoted");
     },
+    filterSkipped.length > 0 ? { includeSkipped: filterSkipped } : undefined,
   );
 
   out.divider();
 
   if (skipped > 0) out.info(`${skipped} candidate(s) skipped. Review later: ${chalk.dim("promote review")}`);
   out.info(`Full digest: ${chalk.bold(digestPath)}`);
+
+  // C3: append user-skipped to digest for team review?
+  if (userSkippedCandidates.length > 0) {
+    const appendUserSkip = await p.confirm({
+      message: `Add ${userSkippedCandidates.length} skipped candidate(s) to digest for team review?`,
+      initialValue: true,
+    });
+    if (!p.isCancel(appendUserSkip) && appendUserSkip) {
+      const updatedDigest = renderDigest(
+        candidates,
+        stats,
+        repo.fullName,
+        config.language.preferredOutput,
+        config,
+        !llmOnly,
+        sinceDays,
+        {
+          filterSkipped: filterSkipped.length > 0 ? filterSkipped : undefined,
+          userSkippedCandidates,
+        },
+      );
+      writeFileSync(digestPath, updatedDigest, "utf-8");
+      out.success(`Digest updated with ${userSkippedCandidates.length} skipped candidate(s)`);
+    }
+  }
 
   if (promoted > 0) {
     out.divider();

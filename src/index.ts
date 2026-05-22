@@ -27,7 +27,30 @@ const program = new Command();
 program
   .name("promote")
   .description("Turn repeated AI review comments into durable repository memory")
-  .version(VERSION);
+  .version(VERSION)
+  .addHelpText(
+    "after",
+    `
+Examples:
+  $ promote init                              Interactive setup
+  $ promote scan                              Scan current repo (uses git remote, last 60d)
+  $ promote scan --repo owner/repo --since 90d
+                                              Scan another repo with custom window
+  $ promote scan --mode broad                 LLM-direct clustering for convention-level patterns
+  $ promote scan --out path/to/digest.md      Custom digest output path
+  $ promote review                            Interactively pick from pending candidates
+  $ promote candidate_001 --target agents     Apply a specific candidate
+  $ promote snooze candidate_001 --days 14    Defer for 14 days
+
+Common scan options (see 'promote scan --help' for all):
+  --repo <owner/repo>     GitHub repository (default: current git remote)
+  --since <days>          Time window, e.g. 60d (default: per config)
+  --mode <quick|broad>    Clustering mode (default: per config)
+  --out <path>            Digest output file path
+
+Run 'promote <command> --help' for command-specific options.
+`,
+  );
 
 program
   .command("init")

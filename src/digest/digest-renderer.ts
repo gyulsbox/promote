@@ -1,4 +1,4 @@
-import type { PromotionCandidate, AnalysisStats, PromoteConfig } from "../core/types.js";
+import type { PromotionCandidate, AnalysisStats, PromoteConfig, SkippedItem, SkipReason } from "../core/types.js";
 import { NAME, VERSION } from "../version.js";
 
 function fmtMs(ms: number): string {
@@ -10,7 +10,7 @@ function fmtMs(ms: number): string {
   return `${m}m ${rem}s`;
 }
 
-const TRANSLATIONS: Record<string, {
+type Translation = {
   title: string;
   generated: string;
   summary: string;
@@ -22,7 +22,18 @@ const TRANSLATIONS: Record<string, {
   alternatives: string;
   actions: string;
   noCandidates: string;
-}> = {
+  filteredOut: string;
+  filteredOutIntro: string;
+  reasonAlreadyPromoted: string;
+  reasonAlreadyIgnored: string;
+  reasonNotPromotable: string;
+  reasonLowConfidence: string;
+  reasonClassifyFailed: string;
+  skippedDuringReview: string;
+  skippedDuringReviewIntro: string;
+};
+
+const TRANSLATIONS: Record<string, Translation> = {
   en: {
     title: "Memory Promotion Digest",
     generated: "Generated on",
@@ -35,6 +46,15 @@ const TRANSLATIONS: Record<string, {
     alternatives: "Alternatives considered",
     actions: "Actions",
     noCandidates: "No promotion candidates found.",
+    filteredOut: "Filtered out",
+    filteredOutIntro: "Items that were excluded from promotion candidates. Useful for tuning thresholds or for team review of edge cases.",
+    reasonAlreadyPromoted: "Already promoted",
+    reasonAlreadyIgnored: "Already ignored",
+    reasonNotPromotable: "Not promotable (target=none / invalid)",
+    reasonLowConfidence: "Below confidence threshold",
+    reasonClassifyFailed: "Failed during classify",
+    skippedDuringReview: "Skipped during review",
+    skippedDuringReviewIntro: "Candidates the reviewer chose to defer during interactive review. Not persisted in the database — these are session-only.",
   },
   ko: {
     title: "메모리 승격 다이제스트",
@@ -48,6 +68,15 @@ const TRANSLATIONS: Record<string, {
     alternatives: "고려된 대안",
     actions: "실행 명령어",
     noCandidates: "승격 후보가 없습니다.",
+    filteredOut: "필터링된 항목",
+    filteredOutIntro: "승격 후보에서 제외된 항목들. 임계치 튜닝이나 팀 리뷰의 엣지 케이스 확인에 유용합니다.",
+    reasonAlreadyPromoted: "이미 승격됨",
+    reasonAlreadyIgnored: "이미 무시됨",
+    reasonNotPromotable: "승격 불가 (target=none / invalid)",
+    reasonLowConfidence: "신뢰도 임계치 미만",
+    reasonClassifyFailed: "분류 단계에서 실패",
+    skippedDuringReview: "리뷰 중 보류된 항목",
+    skippedDuringReviewIntro: "인터랙티브 리뷰에서 검토자가 보류로 미룬 후보들. DB에 저장되지 않은 세션 한정 기록입니다.",
   },
   ja: {
     title: "メモリ昇格ダイジェスト",
@@ -61,7 +90,24 @@ const TRANSLATIONS: Record<string, {
     alternatives: "検討された代替案",
     actions: "アクション",
     noCandidates: "昇格候補はありません。",
+    filteredOut: "除外された項目",
+    filteredOutIntro: "昇格候補から除外された項目。閾値調整やチームレビューのエッジケース確認に有用です。",
+    reasonAlreadyPromoted: "既に昇格済み",
+    reasonAlreadyIgnored: "既に無視済み",
+    reasonNotPromotable: "昇格不可 (target=none / invalid)",
+    reasonLowConfidence: "信頼度閾値未満",
+    reasonClassifyFailed: "分類で失敗",
+    skippedDuringReview: "レビュー中に保留された項目",
+    skippedDuringReviewIntro: "インタラクティブレビューでレビュー者が保留にした候補。DBに保存されないセッション限定の記録です。",
   },
+};
+
+const REASON_TRANSLATION_KEYS: Record<SkipReason, keyof Translation> = {
+  "already-promoted": "reasonAlreadyPromoted",
+  "already-ignored": "reasonAlreadyIgnored",
+  "not-promotable": "reasonNotPromotable",
+  "low-confidence": "reasonLowConfidence",
+  "classify-failed": "reasonClassifyFailed",
 };
 
 export function renderDigest(
@@ -72,6 +118,10 @@ export function renderDigest(
   config?: PromoteConfig,
   embeddingMode?: boolean,
   sinceDays?: number,
+  options?: {
+    filterSkipped?: SkippedItem[];
+    userSkippedCandidates?: PromotionCandidate[];
+  },
 ): string {
   const date = new Date().toISOString().split("T")[0];
   const lines: string[] = [];
@@ -125,9 +175,18 @@ export function renderDigest(
   lines.push("---");
   lines.push("");
 
-  if (candidates.length === 0) {
+  const filterSkipped = options?.filterSkipped ?? [];
+  const userSkipped = options?.userSkippedCandidates ?? [];
+  const hasAppendix = filterSkipped.length > 0 || userSkipped.length > 0;
+
+  if (candidates.length === 0 && !hasAppendix) {
     lines.push(t.noCandidates);
     return lines.join("\n");
+  }
+
+  if (candidates.length === 0) {
+    lines.push(`*${t.noCandidates}*`);
+    lines.push("");
   }
 
   // Candidates
@@ -215,6 +274,70 @@ export function renderDigest(
     lines.push(`promote snooze ${c.id} --days 30`);
     lines.push("```");
     lines.push("");
+    lines.push("---");
+    lines.push("");
+  }
+
+  if (filterSkipped.length > 0) {
+    lines.push(`## ${t.filteredOut}`);
+    lines.push("");
+    lines.push(t.filteredOutIntro);
+    lines.push("");
+
+    const reasonOrder: SkipReason[] = [
+      "already-promoted",
+      "already-ignored",
+      "not-promotable",
+      "low-confidence",
+      "classify-failed",
+    ];
+    const grouped: Record<SkipReason, SkippedItem[]> = {
+      "already-promoted": [],
+      "already-ignored": [],
+      "not-promotable": [],
+      "low-confidence": [],
+      "classify-failed": [],
+    };
+    for (const item of filterSkipped) {
+      grouped[item.reason].push(item);
+    }
+
+    for (const reason of reasonOrder) {
+      const group = grouped[reason];
+      if (group.length === 0) continue;
+      lines.push(`### ${t[REASON_TRANSLATION_KEYS[reason]]} (${group.length})`);
+      lines.push("");
+      for (const item of group) {
+        const meta: string[] = [];
+        if (item.target) meta.push(`target=\`${item.target}\``);
+        if (item.confidence !== undefined) meta.push(`confidence=${item.confidence.toFixed(2)}`);
+        const metaSuffix = meta.length > 0 ? ` — ${meta.join(", ")}` : "";
+        lines.push(`- ${item.summary || "(no summary)"}${metaSuffix}`);
+        if (item.detail) {
+          lines.push(`  - ${item.detail}`);
+        }
+      }
+      lines.push("");
+    }
+    lines.push("---");
+    lines.push("");
+  }
+
+  if (userSkipped.length > 0) {
+    lines.push(`## ${t.skippedDuringReview}`);
+    lines.push("");
+    lines.push(t.skippedDuringReviewIntro);
+    lines.push("");
+    for (const c of userSkipped) {
+      lines.push(`### \`${c.id}\` — ${c.summary}`);
+      lines.push("");
+      lines.push(`- **Target**: \`${c.target}\`${c.suggestedFile ? ` → \`${c.suggestedFile}\`` : ""}`);
+      lines.push(`- **Confidence**: ${c.confidence}`);
+      if (c.pathScope) {
+        lines.push(`- **Path scope**: \`${c.pathScope}\``);
+      }
+      lines.push("");
+    }
     lines.push("---");
     lines.push("");
   }
