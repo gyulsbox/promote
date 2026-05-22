@@ -6,7 +6,7 @@ import type { MemoryContext } from "../memory/memory-scanner.js";
 import type { CostTracker } from "../llm/cost-tracker.js";
 import { CLASSIFICATION_SYSTEM_PROMPT, buildClassificationPrompt } from "./prompts.js";
 import { redactSecrets } from "../normalize/redact.js";
-import { seedIfSupported } from "../llm/provider.js";
+import { seedIfSupported, temperatureIfSupported, llmProviderOptions } from "../llm/provider.js";
 
 const routingDecisionSchema = z.object({
   clusterValid: z
@@ -84,8 +84,8 @@ export async function classifyCluster(input: {
     // OpenAI's structured-outputs strict mode rejects .optional/.min/.max constraints
     // that our schema legitimately uses. Disable strict mode for OpenAI; Anthropic/Google
     // ignore this option and continue to use their native tool-use paths.
-    providerOptions: { openai: { strictJsonSchema: false } },
-    temperature: 0,
+    providerOptions: llmProviderOptions(model),
+    ...temperatureIfSupported(model),
     ...seedIfSupported(model),
     system: CLASSIFICATION_SYSTEM_PROMPT,
     prompt,

@@ -8,7 +8,7 @@ import {
   classifyAmbiguousReplies,
   type ReplySentiment,
 } from "../normalize/reply-sentiment.js";
-import { seedIfSupported } from "../llm/provider.js";
+import { seedIfSupported, temperatureIfSupported, llmProviderOptions } from "../llm/provider.js";
 
 export type HumanReply = {
   authorLogin: string;
@@ -49,8 +49,8 @@ async function matchGeneralCommentsToBots(
   const { object, usage } = await generateObject({
     model,
     schema: matchSchema,
-    providerOptions: { openai: { strictJsonSchema: false } },
-    temperature: 0,
+    providerOptions: llmProviderOptions(model),
+    ...temperatureIfSupported(model),
     ...seedIfSupported(model),
     system:
       "You match human PR conversation comments to the AI review comment they respond to (if any), and classify the sentiment toward that AI suggestion: agree (supportive/will fix), reject (dismissive/by design/won't fix), or neutral. Use null botCommentId when the human comment is unrelated to any AI suggestion.",

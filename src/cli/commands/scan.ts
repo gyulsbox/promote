@@ -211,9 +211,13 @@ export async function runScan(options: ScanOptions) {
 
   // 5. Pre-cluster
   const clusterSpinner = out.spinner("");
+  // When the cluster step reports real progress (LLM-direct path emits
+  // "[depth N] Batch X/Y..." lines), prefer that over the rotating mascot
+  // message — keeps the user informed during multi-minute scans.
+  let liveClusterMessage: string | null = null;
   const clusterTimer = createTimedSpinner(
     clusterSpinner,
-    getClusterMessage,
+    () => liveClusterMessage ?? getClusterMessage(),
     chalk.dim(`[clustering]`),
   );
   const { clusters, mode } = await preCluster({
@@ -224,7 +228,9 @@ export async function runScan(options: ScanOptions) {
     clusteringStrategy: config.llm.clusteringStrategy,
     similarityThreshold: config.thresholds.similarityThreshold,
     costTracker,
-    onProgress: () => {},
+    onProgress: (msg) => {
+      liveClusterMessage = msg;
+    },
   });
   clusterTimer.stop();
   const modeLabel = mode === "llm" ? "LLM direct" : "embedding";

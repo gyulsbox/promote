@@ -4,7 +4,7 @@ import type { LanguageModel } from "ai";
 import type { Cluster } from "../core/types.js";
 import type { CostTracker } from "../llm/cost-tracker.js";
 import { computeSimilarity } from "./similarity.js";
-import { seedIfSupported } from "../llm/provider.js";
+import { seedIfSupported, temperatureIfSupported, llmProviderOptions } from "../llm/provider.js";
 
 const mergeDecisionSchema = z.object({
   shouldMerge: z.boolean().describe("true if both patterns describe the same recurring code quality concern"),
@@ -59,8 +59,8 @@ export async function llmRefine(input: {
       const { object, usage } = await generateObject({
         model,
         schema: mergeDecisionSchema,
-        providerOptions: { openai: { strictJsonSchema: false } },
-        temperature: 0,
+        providerOptions: llmProviderOptions(model),
+        ...temperatureIfSupported(model),
         ...seedIfSupported(model),
         prompt: `Should these two AI code review comment patterns be considered the same recurring issue?\n\nPattern A: ${iBody}\n\nPattern B: ${jBody}\n\nAnswer true only if they describe the exact same code quality concern.`,
       });

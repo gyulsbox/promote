@@ -41,6 +41,50 @@ export function seedIfSupported(model: LanguageModel): { seed?: number } {
   return {};
 }
 
+/**
+ * Returns `{ temperature: 0 }` for models that accept it. OpenAI reasoning
+ * models (gpt-5.x family, o1/o3/o4 series) reject `temperature` entirely and
+ * emit "feature 'temperature' is not supported" on every call. Anthropic and
+ * Google support temperature normally.
+ */
+export function temperatureIfSupported(model: LanguageModel): { temperature?: number } {
+  const provider = (model as { provider?: string }).provider ?? "";
+  const modelId = (model as { modelId?: string }).modelId ?? "";
+  if (provider.startsWith("openai") && /^(gpt-5|o[134])/.test(modelId)) {
+    return {};
+  }
+  return { temperature: 0 };
+}
+
+/**
+ * Returns the right `providerOptions` payload for a given model. Wraps OpenAI
+ * options (strictJsonSchema off so our schema works, reasoningEffort minimal
+ * on reasoning models so they don't burn the output-token budget thinking
+ * about clustering decisions). Anthropic and Google pass through with no
+ * openai sub-object — harmless if openai key is present but model isn't.
+ */
+type ProviderOptionValue = string | number | boolean;
+type ProviderOptions = Record<string, Record<string, ProviderOptionValue>>;
+
+export function llmProviderOptions(model: LanguageModel): ProviderOptions {
+  const provider = (model as { provider?: string }).provider ?? "";
+  const modelId = (model as { modelId?: string }).modelId ?? "";
+
+  if (!provider.startsWith("openai")) return {};
+
+  const opts: Record<string, ProviderOptionValue> = { strictJsonSchema: false };
+  if (/^(gpt-5|o[134])/.test(modelId)) {
+    // "low" keeps reasoning tokens small so the model emits the final JSON
+    // before maxOutputTokens runs out. (gpt-5.4-mini rejects "minimal" with
+    // "Unsupported value: 'reasoning_effort' does not support 'minimal' with
+    // this model. Supported values are: 'none', 'low', 'medium', 'high',
+    // 'xhigh'." — "low" is supported across the gpt-5.x family.)
+    opts.reasoningEffort = "low";
+  }
+
+  return { openai: opts };
+}
+
 function resolveOpenAI(config: LLMConfig): ResolvedModels {
   if (!process.env.OPENAI_API_KEY) {
     throw new Error("OPENAI_API_KEY environment variable is required for OpenAI provider.");
