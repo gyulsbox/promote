@@ -1,5 +1,30 @@
 # Changelog
 
+## [0.7.0](https://github.com/gyulsbox/promote/compare/v0.6.0...v0.7.0) (2026-05-22)
+
+
+### Features
+
+* headless mode + bundled PR creation for CI ([23e6247](https://github.com/gyulsbox/promote/commit/23e6247a93508af6dc5b45a074ad8b0bcb20bacc))
+* headless mode + bundled PR creation for CI ([06820e6](https://github.com/gyulsbox/promote/commit/06820e66bc69a1e9d894a9db36a9531e401532cf))
+
+
+### Bug Fixes
+
+* **pr:** config-prefer file resolution + label warnings + cleaner confidence ([b40d319](https://github.com/gyulsbox/promote/commit/b40d319bbcff504555136f5bd0003672671092e7))
+* **pr:** cut promote branch from main, make labels best-effort ([99bd6c5](https://github.com/gyulsbox/promote/commit/99bd6c521ee82580c05596ddebaa27738d2781b1))
+
+
+### Refactors
+
+* **pr:** atomic --create-pr flow with rollback + skipped logging + tests ([9e4519f](https://github.com/gyulsbox/promote/commit/9e4519fa7d1b29701923db18fdf873d3ad624dc0))
+
+
+### Docs
+
+* **readme:** document atomic flow, rollback, branch cut, and file-path guard ([ac186b2](https://github.com/gyulsbox/promote/commit/ac186b2e588631d689533c02101e77d29320d87c))
+* **readme:** roadmap — call out atomic flow + add MCP and per-candidate PR mode ([6ae7cba](https://github.com/gyulsbox/promote/commit/6ae7cba84e7c893919b6d27337f08287134a7fea))
+
 ## [0.6.0](https://github.com/gyulsbox/promote/compare/v0.5.1...v0.6.0) (2026-05-22)
 
 
