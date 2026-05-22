@@ -1,4 +1,4 @@
-import { writeFileSync, readFileSync, existsSync, mkdirSync } from "node:fs";
+import { writeFileSync, readFileSync, existsSync, mkdirSync, readdirSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import chalk from "chalk";
 import * as p from "@clack/prompts";
@@ -137,10 +137,24 @@ export async function runPromote(candidateId: string, options: PromoteOptions) {
 
 function resolveTargetFile(
   target: string,
-  candidate: { suggestedFile?: string | null; pathScope?: string | null },
+  candidate: { suggestedFile?: string | null; pathScope?: string | null; summary?: string | null },
   config: ReturnType<typeof loadConfig>,
 ): string {
-  // If candidate has a suggested file, validate and use it
+  // ADR: always compute numbered filename, never rely on suggestedFile placeholder
+  if (target === "adr") {
+    const dir = config.memoryTargets?.adr?.dir ?? "docs/adr";
+    const slug = toSlug(candidate.summary ?? "decision") || "decision";
+    const nextNum = getNextAdrNumber(dir);
+    return `${dir}/${String(nextNum).padStart(3, "0")}-${slug}.md`;
+  }
+
+  // test: generate stub path from summary
+  if (target === "test") {
+    const slug = toSlug(candidate.summary ?? "test") || "test";
+    return `docs/test-stubs/${slug}.md`;
+  }
+
+  // For other targets, use suggestedFile if valid
   if (candidate.suggestedFile && isValidFilePath(candidate.suggestedFile)) {
     return candidate.suggestedFile;
   }
@@ -156,13 +170,29 @@ function resolveTargetFile(
       const slug = scope.replace(/[/*]/g, "-").replace(/^-+|-+$/g, "") || "rule";
       return `${dir}/${slug}.instructions.md`;
     }
-    case "adr": {
-      const dir = config.memoryTargets?.adr?.dir ?? "docs/adr";
-      return `${dir}/NNN-title.md`;
-    }
-    case "test":
-      return "(test — see digest for details)";
     default:
       return "AGENTS.md";
   }
+}
+
+function toSlug(text: string): string {
+  return text
+    .toLowerCase()
+    .replace(/[^a-z0-9\s-]/g, "")
+    .trim()
+    .replace(/[\s-]+/g, "-")
+    .slice(0, 50)
+    .replace(/-+$/, "");
+}
+
+function getNextAdrNumber(adrDir: string): number {
+  const fullDir = resolve(process.cwd(), adrDir);
+  if (!existsSync(fullDir)) return 1;
+  const files = readdirSync(fullDir);
+  let maxNum = 0;
+  for (const f of files) {
+    const match = f.match(/^(\d+)-/);
+    if (match) maxNum = Math.max(maxNum, parseInt(match[1], 10));
+  }
+  return maxNum + 1;
 }

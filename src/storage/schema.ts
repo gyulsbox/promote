@@ -34,6 +34,7 @@ export const clusters = sqliteTable("clusters", {
     .references(() => reviewComments.id),
   summary: text("summary"),
   memberCount: integer("member_count").notNull(),
+  medoidEmbedding: blob("medoid_embedding", { mode: "buffer" }),
   createdAt: text("created_at")
     .notNull()
     .$defaultFn(() => new Date().toISOString()),
@@ -58,6 +59,7 @@ export const candidates = sqliteTable("candidates", {
   clusterId: text("cluster_id")
     .notNull()
     .references(() => clusters.id),
+  clusterFingerprint: text("cluster_fingerprint"),
   target: text("target").notNull(),
   confidence: real("confidence").notNull(),
   summary: text("summary").notNull(),

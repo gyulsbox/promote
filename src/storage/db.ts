@@ -35,6 +35,7 @@ CREATE TABLE IF NOT EXISTS clusters (
   representative_comment_id TEXT NOT NULL REFERENCES review_comments(id),
   summary TEXT,
   member_count INTEGER NOT NULL,
+  medoid_embedding BLOB,
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -50,6 +51,7 @@ CREATE TABLE IF NOT EXISTS candidates (
   id TEXT PRIMARY KEY,
   repo TEXT NOT NULL,
   cluster_id TEXT NOT NULL REFERENCES clusters(id),
+  cluster_fingerprint TEXT,
   target TEXT NOT NULL,
   confidence REAL NOT NULL,
   summary TEXT NOT NULL,
@@ -95,6 +97,15 @@ export function initDatabase(dbPath?: string): { db: ReturnType<typeof drizzle>;
   sqlite.pragma("journal_mode = WAL");
   sqlite.pragma("foreign_keys = ON");
   sqlite.exec(SCHEMA_SQL);
+
+  // Migrations for existing databases (ADD COLUMN is idempotent via try/catch)
+  const migrations = [
+    "ALTER TABLE clusters ADD COLUMN medoid_embedding BLOB",
+    "ALTER TABLE candidates ADD COLUMN cluster_fingerprint TEXT",
+  ];
+  for (const migration of migrations) {
+    try { sqlite.exec(migration); } catch { /* column already exists */ }
+  }
 
   const db = drizzle(sqlite, { schema });
 

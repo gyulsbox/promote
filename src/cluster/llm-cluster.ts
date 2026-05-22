@@ -17,6 +17,8 @@ const clusterResultSchema = z.object({
   ),
 });
 
+const BATCH_SIZE = 30;
+
 export async function llmCluster(input: {
   comments: NormalizedComment[];
   model: LanguageModel;
@@ -27,7 +29,56 @@ export async function llmCluster(input: {
 
   if (comments.length === 0) return [];
 
-  // Build comment list for the prompt
+  if (comments.length <= BATCH_SIZE) {
+    return singlePassCluster(comments, model, costTracker, onProgress);
+  }
+
+  // Tree-reduce: cluster batches, then cluster the per-batch representatives
+  onProgress?.(`Batched clustering: ${comments.length} comments in batches of ${BATCH_SIZE}...`);
+
+  const batches = chunk(comments, BATCH_SIZE);
+  const batchResults: Array<{ representative: NormalizedComment; members: NormalizedComment[] }> = [];
+
+  for (let b = 0; b < batches.length; b++) {
+    onProgress?.(`Batch ${b + 1}/${batches.length}...`);
+    const batchClusters = await singlePassCluster(batches[b], model, costTracker);
+    for (const cluster of batchClusters) {
+      batchResults.push({ representative: cluster.representative, members: cluster.members });
+    }
+  }
+
+  // Cluster the per-batch representatives
+  onProgress?.(`Merging ${batchResults.length} batch representatives...`);
+  const representatives = batchResults.map((r) => r.representative);
+  const topClusters = await singlePassCluster(representatives, model, costTracker);
+
+  // Reassign all original members to the top-level clusters
+  return topClusters.map((topCluster) => {
+    const allMembers: NormalizedComment[] = [];
+    for (const topMember of topCluster.members) {
+      const batchResult = batchResults.find((br) => br.representative.id === topMember.id);
+      if (batchResult) {
+        allMembers.push(...batchResult.members);
+      } else {
+        allMembers.push(topMember);
+      }
+    }
+    return {
+      ...topCluster,
+      members: allMembers,
+      memberEmbeddings: [],
+    };
+  });
+}
+
+async function singlePassCluster(
+  comments: NormalizedComment[],
+  model: LanguageModel,
+  costTracker: CostTracker,
+  onProgress?: (msg: string) => void,
+): Promise<Cluster[]> {
+  if (comments.length === 0) return [];
+
   const commentList = comments
     .map((c, i) => {
       const pathInfo = c.filePath ? ` [${c.filePath}]` : "";
@@ -55,7 +106,6 @@ Every comment must appear in exactly one group. Single-comment groups are fine.`
     completionTokens: usage?.outputTokens ?? 0,
   });
 
-  // Convert LLM output to Cluster objects
   const clusters: Cluster[] = [];
 
   for (const group of object.clusters) {
@@ -69,14 +119,22 @@ Every comment must appear in exactly one group. Single-comment groups are fine.`
     clusters.push({
       id: generateClusterId(representative),
       representative,
-      representativeEmbedding: [], // no embeddings in LLM mode
+      representativeEmbedding: [],
       members,
-      memberEmbeddings: [], // no embeddings in LLM mode
+      memberEmbeddings: [],
       fingerprint: generateFingerprint(representative),
     });
   }
 
   return clusters;
+}
+
+function chunk<T>(arr: T[], size: number): T[][] {
+  const result: T[][] = [];
+  for (let i = 0; i < arr.length; i += size) {
+    result.push(arr.slice(i, i + size));
+  }
+  return result;
 }
 
 function generateClusterId(representative: NormalizedComment): string {

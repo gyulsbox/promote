@@ -65,10 +65,10 @@ const promoteConfigSchema = z.object({
     .object({
       minOccurrences: z.number().int().min(2).default(3),
       windowDays: z.number().int().min(1).default(60),
-      similarityThreshold: z.number().min(0).max(1).default(0.82),
+      similarityThreshold: z.number().min(0).max(1).default(0.85),
       minConfidence: z.number().min(0).max(1).default(0.75),
     })
-    .default({ minOccurrences: 3, windowDays: 60, similarityThreshold: 0.82, minConfidence: 0.75 }),
+    .default({ minOccurrences: 3, windowDays: 60, similarityThreshold: 0.85, minConfidence: 0.75 }),
 
   llm: z
     .object({
@@ -132,7 +132,7 @@ export const DEFAULT_CONFIG_CONTENT = `version: 1
 # thresholds:
 #   minOccurrences: 3
 #   windowDays: 60
-#   similarityThreshold: 0.82
+#   similarityThreshold: 0.85
 #   minConfidence: 0.75
 
 # llm:

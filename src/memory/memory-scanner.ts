@@ -43,10 +43,19 @@ export async function scanExistingMemory(
 ): Promise<MemoryContext> {
   const files: MemoryFile[] = [];
 
+  // Merge config values with defaults
+  const memoryFiles = config?.agents?.preferredFiles ?? DEFAULT_MEMORY_FILES;
+  const adrDir = config?.adr?.dir ?? "docs/adr";
+  const pathScopedDir = config?.pathScoped?.preferredDir ?? ".github/instructions";
+  const memoryDirs = [
+    { path: pathScopedDir, pattern: /\.instructions\.md$/ },
+    { path: adrDir, pattern: /\.md$/ },
+  ];
+
   suppressOctokitWarnings();
 
   // Scan known memory files
-  for (const filePath of DEFAULT_MEMORY_FILES) {
+  for (const filePath of memoryFiles) {
     const content = await fetchFileContent(octokit, repo, filePath);
     if (content) {
       files.push({
@@ -58,7 +67,7 @@ export async function scanExistingMemory(
   }
 
   // Scan memory directories
-  for (const dir of DEFAULT_MEMORY_DIRS) {
+  for (const dir of memoryDirs) {
     const dirFiles = await listDirectory(octokit, repo, dir.path);
     for (const f of dirFiles.filter((n) => dir.pattern.test(n)).slice(0, 5)) {
       const fullPath = `${dir.path}/${f}`;

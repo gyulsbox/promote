@@ -72,58 +72,67 @@ export async function analyzeReviewMemory(input: {
   // 7. Classify + Draft each repeated cluster
   const candidates: PromotionCandidate[] = [];
   let candidateIndex = 1;
+  let failedClusters = 0;
 
   for (const cluster of repeatedClusters) {
     onProgress("classify", `Classifying cluster ${candidateIndex}/${repeatedClusters.length}...`);
 
-    const decision = await classifyCluster({
-      cluster,
-      model: models.classificationModel,
-      memoryContext,
-      costTracker,
-    });
+    try {
+      const decision = await classifyCluster({
+        cluster,
+        model: models.classificationModel,
+        memoryContext,
+        costTracker,
+        redact: config.privacy.redactSecrets,
+      });
 
-    // Skip low confidence or non-promotable
-    if (!decision.clusterValid) continue;
-    if (decision.target === "none" || decision.target === "pr_only") continue;
-    if (decision.confidence < config.thresholds.minConfidence) continue;
+      // Skip low confidence or non-promotable
+      if (!decision.clusterValid) continue;
+      if (decision.target === "none" || decision.target === "pr_only") continue;
+      if (decision.confidence < config.thresholds.minConfidence) continue;
 
-    onProgress("draft", `Drafting candidate ${candidateIndex}...`);
+      onProgress("draft", `Drafting candidate ${candidateIndex}...`);
 
-    const draft = await generateDraft({
-      cluster,
-      decision,
-      model: models.draftingModel,
-      costTracker,
-      preferredLanguage: config.language.preferredOutput,
-    });
+      const draft = await generateDraft({
+        cluster,
+        decision,
+        model: models.draftingModel,
+        costTracker,
+        preferredLanguage: config.language.preferredOutput,
+        redact: config.privacy.redactSecrets,
+      });
 
-    const candidateId = `candidate_${String(candidateIndex).padStart(3, "0")}`;
+      const candidateId = `candidate_${String(candidateIndex).padStart(3, "0")}`;
 
-    candidates.push({
-      id: candidateId,
-      repo: repo.fullName,
-      clusterId: cluster.id,
-      summary: decision.summary,
-      target: decision.target,
-      confidence: decision.confidence,
-      suggestedFile: decision.suggestedFile ?? draft.targetFile,
-      pathScope: decision.pathScope,
-      draft,
-      reasoning: decision.reason,
-      alternatives: decision.alternatives,
-      occurrences: cluster.members.map((m) => ({
-        prNumber: m.prNumber,
-        path: m.filePath,
-        url: m.htmlUrl,
-        excerpt: m.normalizedBody.slice(0, 150),
-        authorLogin: m.authorLogin,
-        createdAt: m.createdAt,
-      })),
-      status: decision.needsHumanDecision ? "needs_human_decision" : "candidate",
-    });
+      candidates.push({
+        id: candidateId,
+        repo: repo.fullName,
+        clusterId: cluster.id,
+        clusterFingerprint: cluster.fingerprint,
+        summary: decision.summary,
+        target: decision.target,
+        confidence: decision.confidence,
+        suggestedFile: decision.suggestedFile ?? draft.targetFile,
+        pathScope: decision.pathScope,
+        draft,
+        reasoning: decision.reason,
+        alternatives: decision.alternatives,
+        occurrences: cluster.members.map((m) => ({
+          prNumber: m.prNumber,
+          path: m.filePath,
+          url: m.htmlUrl,
+          excerpt: m.normalizedBody.slice(0, 150),
+          authorLogin: m.authorLogin,
+          createdAt: m.createdAt,
+        })),
+        status: decision.needsHumanDecision ? "needs_human_decision" : "candidate",
+      });
 
-    candidateIndex++;
+      candidateIndex++;
+    } catch (err) {
+      failedClusters++;
+      onProgress("error", `Cluster ${candidateIndex} failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
   }
 
   // Build stats
@@ -137,6 +146,7 @@ export async function analyzeReviewMemory(input: {
     clustersFound: clusters.length,
     repeatedClusters: repeatedClusters.length,
     candidatesGenerated: candidates.length,
+    failedClusters,
     prCount: uniquePrs.size,
     embeddingTokens: cost.totalPromptTokens,
     classificationTokens: cost.totalCompletionTokens,

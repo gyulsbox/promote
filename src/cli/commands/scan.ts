@@ -17,7 +17,13 @@ import { resolveModels } from "../../llm/provider.js";
 import { CostTracker } from "../../llm/cost-tracker.js";
 import { loadConfig } from "../../core/config.js";
 import { initDatabase } from "../../storage/db.js";
-import { upsertComments } from "../../storage/repositories.js";
+import {
+  upsertComments,
+  resetExpiredSnoozes,
+  getCandidateByClusterFingerprint,
+  upsertCandidateRecord,
+  saveCluster,
+} from "../../storage/repositories.js";
 import type { PromotionCandidate, AnalysisStats } from "../../core/types.js";
 import * as out from "../output.js";
 import { mascotSays, mascotHappy } from "../mascot.js";
@@ -93,6 +99,12 @@ export async function runScan(options: ScanOptions) {
   // 3. Store
   const { db } = initDatabase();
   upsertComments(db, allComments, repo.fullName);
+
+  // Re-activate snoozed candidates whose snooze period has expired
+  const reactivated = resetExpiredSnoozes(db, repo.fullName);
+  if (reactivated > 0) {
+    out.info(`${reactivated} snoozed candidate(s) reactivated (snooze period expired)`);
+  }
 
   // 4. Normalize
   const normalizeSpinner = out.spinner("Normalizing...");
@@ -208,12 +220,21 @@ export async function runScan(options: ScanOptions) {
   };
 
   const processCluster = async (cluster: typeof repeatedClusters[0], index: number): Promise<void> => {
+    // Skip clusters already promoted or ignored in a previous scan
+    const existing = getCandidateByClusterFingerprint(db, repo.fullName, cluster.fingerprint);
+    if (existing && (existing.status === "promoted" || existing.status === "ignored")) {
+      resultBuffer[index] = { index, candidate: null, summary: existing.summary, skipped: true };
+      flushBuffer();
+      return;
+    }
+
     const decision = await classifyCluster({
       cluster,
       model: models.classificationModel,
       memoryContext,
       costTracker,
       outputLanguage: config.language.preferredOutput,
+      redact: config.privacy.redactSecrets,
     });
 
     if (!decision.clusterValid || decision.target === "none" || decision.target === "pr_only") {
@@ -234,6 +255,7 @@ export async function runScan(options: ScanOptions) {
       model: models.draftingModel,
       costTracker,
       preferredLanguage: config.language.preferredOutput,
+      redact: config.privacy.redactSecrets,
     });
 
     resultBuffer[index] = {
@@ -242,6 +264,7 @@ export async function runScan(options: ScanOptions) {
         id: "",
         repo: repo.fullName,
         clusterId: cluster.id,
+        clusterFingerprint: cluster.fingerprint,
         summary: decision.summary,
         target: decision.target,
         confidence: decision.confidence,
@@ -301,6 +324,41 @@ export async function runScan(options: ScanOptions) {
   activeTimer.stop();
   activeSpinner.stop();
 
+  // Persist clusters + candidates to DB for cross-run dedup
+  // Clusters must be inserted first (candidates FK → clusters)
+  const clusterMap = new Map(repeatedClusters.map((c) => [c.id, c]));
+  for (const c of candidates) {
+    const cluster = clusterMap.get(c.clusterId);
+    if (cluster) {
+      saveCluster(
+        db,
+        cluster.id,
+        repo.fullName,
+        cluster.fingerprint,
+        cluster.representative.id,
+        cluster.members.length,
+        cluster.representativeEmbedding,
+      );
+    }
+  }
+  for (const c of candidates) {
+    upsertCandidateRecord(db, {
+      id: c.id,
+      repo: c.repo,
+      clusterId: c.clusterId,
+      clusterFingerprint: c.clusterFingerprint,
+      target: c.target,
+      confidence: c.confidence,
+      summary: c.summary,
+      reason: c.reasoning,
+      suggestedFile: c.suggestedFile,
+      pathScope: c.pathScope,
+      draftContent: c.draft.content,
+      alternativesJson: JSON.stringify(c.alternatives),
+      status: c.status,
+    });
+  }
+
   out.divider();
 
   // Cost
@@ -323,6 +381,7 @@ export async function runScan(options: ScanOptions) {
     clustersFound: clusters.length,
     repeatedClusters: repeatedClusters.length,
     candidatesGenerated: candidates.length,
+    failedClusters: 0,
     prCount: uniquePrs.size,
     embeddingTokens: cost.totalPromptTokens,
     classificationTokens: cost.totalCompletionTokens,

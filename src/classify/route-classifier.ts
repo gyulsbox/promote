@@ -5,6 +5,7 @@ import type { Cluster, RoutingDecision } from "../core/types.js";
 import type { MemoryContext } from "../memory/memory-scanner.js";
 import type { CostTracker } from "../llm/cost-tracker.js";
 import { CLASSIFICATION_SYSTEM_PROMPT, buildClassificationPrompt } from "./prompts.js";
+import { redactSecrets } from "../normalize/redact.js";
 
 const routingDecisionSchema = z.object({
   clusterValid: z
@@ -39,14 +40,17 @@ export async function classifyCluster(input: {
   memoryContext: MemoryContext;
   costTracker: CostTracker;
   outputLanguage?: string;
+  redact?: boolean;
 }): Promise<RoutingDecision> {
-  const { cluster, model, memoryContext, costTracker, outputLanguage } = input;
+  const { cluster, model, memoryContext, costTracker, outputLanguage, redact = true } = input;
 
   // Build examples (cap at 5)
   const examples = cluster.members.slice(0, 5).map((m) => ({
     prNumber: m.prNumber,
     path: m.filePath,
-    excerpt: m.normalizedBody.slice(0, 300),
+    excerpt: redact
+      ? redactSecrets(m.normalizedBody.slice(0, 300))
+      : m.normalizedBody.slice(0, 300),
   }));
 
   // Collect all identifiers and paths across members

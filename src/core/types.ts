@@ -79,6 +79,7 @@ export type PromotionCandidate = {
   id: string;
   repo: string;
   clusterId: string;
+  clusterFingerprint?: string;
   summary: string;
   target: RoutingTarget;
   confidence: number;
@@ -110,6 +111,7 @@ export type AnalysisStats = {
   clustersFound: number;
   repeatedClusters: number;
   candidatesGenerated: number;
+  failedClusters: number;
   prCount: number;
   embeddingTokens: number;
   classificationTokens: number;
