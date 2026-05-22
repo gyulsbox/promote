@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.6.0](https://github.com/gyulsbox/promote/compare/v0.5.1...v0.6.0) (2026-05-22)
+
+
+### Features
+
+* surface filtered and skipped items in digest ([2e2970d](https://github.com/gyulsbox/promote/commit/2e2970d5353cedd81b03103f34aac1202192ae82))
+* surface filtered and skipped items in digest ([444bc87](https://github.com/gyulsbox/promote/commit/444bc877e8f6d647164c9f06b9c5c36645f5e9c8))
+
+
+### Docs
+
+* reflect filter transparency in README + tighten roadmap ([16d5f9d](https://github.com/gyulsbox/promote/commit/16d5f9d6b05219ac70997c5e86995932140cb7ea))
+* show new skip prompts in Quick start step 3 ([278e468](https://github.com/gyulsbox/promote/commit/278e4682c3ebc64deda2a9418710b9b33e626a81))
+
 ## [0.5.1](https://github.com/gyulsbox/promote/compare/v0.5.0...v0.5.1) (2026-05-22)
 
 
