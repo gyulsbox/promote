@@ -294,11 +294,11 @@ promote scan \
 
 ## Roadmap
 
-**Shipping today** — Personal CLI, multi-tool routing, hybrid clustering, human reply/reaction signal, filter transparency, stable IDs, secret redaction, i18n digest (en / ko / ja), headless CI mode with bundled PR creation, GitHub Action template.
+**Shipping today** — Personal CLI, multi-tool routing, hybrid clustering, human reply/reaction signal, filter transparency, stable IDs, secret redaction, i18n digest (en / ko / ja), atomic headless `--create-pr` flow (cuts from base, rollback on failure, LLM-filled PR template, gh/octokit dual transport), GitHub Action template for scheduled weekly digest PRs.
 
-**Next** — Machine-readable output (JSON) for scripted pipelines, atomic-per-candidate PR mode toggle.
+**Next** — MCP server for agent-native workflows (Claude Code / Codex / compatible MCP clients), machine-readable JSON output for scripted pipelines, per-candidate PR mode (split a bundled run into one PR per candidate when teams prefer atomic memory PRs).
 
-**Later** — eval command for classification accuracy, memory health checks, hosted GitHub App.
+**Later** — `promote eval` for classification accuracy, memory health checks (stale rules, conflicting instructions, oversized files), hosted GitHub App.
 
 <br />
 
