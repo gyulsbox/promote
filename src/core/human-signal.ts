@@ -10,14 +10,22 @@ export function aggregateHumanSignal(
   let plusOne = 0;
   let minusOne = 0;
   let firstRejectExcerpt: string | undefined;
+  let firstAgreementExcerpt: string | undefined;
+  const agreementAuthorSet = new Set<string>();
+  const rejectionAuthorSet = new Set<string>();
 
   for (const m of cluster.members) {
     const ctx = replyContextMap.get(m.id);
     if (!ctx) continue;
     for (const r of ctx.replies) {
-      if (r.sentiment === "agree") agree++;
+      if (r.sentiment === "agree") {
+        agree++;
+        agreementAuthorSet.add(r.authorLogin);
+        if (!firstAgreementExcerpt) firstAgreementExcerpt = r.body.slice(0, 120);
+      }
       if (r.sentiment === "reject") {
         reject++;
+        rejectionAuthorSet.add(r.authorLogin);
         if (!firstRejectExcerpt) firstRejectExcerpt = r.body.slice(0, 120);
       }
     }
@@ -31,5 +39,8 @@ export function aggregateHumanSignal(
     plusOneCount: plusOne,
     minusOneCount: minusOne,
     firstRejectExcerpt,
+    firstAgreementExcerpt,
+    agreementAuthors: agreementAuthorSet.size > 0 ? [...agreementAuthorSet] : undefined,
+    rejectionAuthors: rejectionAuthorSet.size > 0 ? [...rejectionAuthorSet] : undefined,
   };
 }

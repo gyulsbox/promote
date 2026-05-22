@@ -34,9 +34,12 @@ function resolveOpenAI(config: LLMConfig): ResolvedModels {
 
   const openai = createOpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
+  // Use .chat() (Chat Completions API) rather than the default Responses API:
+  // Responses doesn't expose `seed`, which we rely on for run-to-run reproducibility
+  // of classify/cluster/refine decisions.
   return {
-    classificationModel: openai(config.classificationModel),
-    draftingModel: openai(config.draftingModel),
+    classificationModel: openai.chat(config.classificationModel),
+    draftingModel: openai.chat(config.draftingModel),
     embeddingModel: openai.embeddingModel(config.embeddingModel),
   };
 }

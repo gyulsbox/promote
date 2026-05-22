@@ -66,7 +66,7 @@ export async function runInteractiveReview(
 
       if (p.isCancel(action)) {
         mascotSays("Review cancelled. Remaining candidates saved in digest.");
-        return stats;
+        process.exit(130);
       }
 
       if (action === "show-full") {
@@ -113,10 +113,13 @@ function printCandidateDetails(c: PromotionCandidate, num: string) {
   console.log();
   console.log(`  ${chalk.bold(c.summary)}`);
   console.log();
+  const uniquePrs = new Set(c.occurrences.map((o) => o.prNumber)).size;
+  const scope = uniquePrs >= 2 ? chalk.green(`cross-PR (${uniquePrs} PRs)`) : chalk.yellow(`within-PR (1 PR)`);
   console.log(`  ${chalk.dim("ID")}          ${chalk.dim(c.id)}`);
   console.log(`  ${chalk.dim("Target")}      ${chalk.cyan(c.target)}${c.suggestedFile ? chalk.dim(` → ${c.suggestedFile}`) : ""}`);
   console.log(`  ${chalk.dim("Confidence")}  ${c.confidence}`);
-  console.log(`  ${chalk.dim("Occurrences")} ${c.occurrences.length}`);
+  console.log(`  ${chalk.dim("Scope")}       ${scope}`);
+  console.log(`  ${chalk.dim("Occurrences")} ${c.occurrences.length} comment${c.occurrences.length === 1 ? "" : "s"}`);
   if (c.pathScope) {
     console.log(`  ${chalk.dim("Path scope")}  ${c.pathScope}`);
   }
@@ -140,8 +143,17 @@ function printCandidateDetails(c: PromotionCandidate, num: string) {
       if (s.plusOneCount > 0) parts.push(`👍 ${s.plusOneCount}`);
       if (s.minusOneCount > 0) parts.push(`👎 ${s.minusOneCount}`);
       console.log(`  ${chalk.dim("Human signal")} ${parts.join(" · ")}`);
+      if (s.agreementAuthors?.length) {
+        console.log(`  ${chalk.dim("Agreed by")}   ${chalk.green(s.agreementAuthors.map((a) => `@${a}`).join(", "))}`);
+      }
+      if (s.firstAgreementExcerpt) {
+        console.log(`  ${chalk.dim("Agreement")}  ${chalk.green(`"${s.firstAgreementExcerpt}"`)}`);
+      }
+      if (s.rejectionAuthors?.length) {
+        console.log(`  ${chalk.dim("Dismissed by")}${chalk.red(s.rejectionAuthors.map((a) => `@${a}`).join(", "))}`);
+      }
       if (s.firstRejectExcerpt) {
-        console.log(`  ${chalk.dim("Dismissal")}   ${chalk.yellow(`"${s.firstRejectExcerpt}"`)}`);
+        console.log(`  ${chalk.dim("Dismissal")}  ${chalk.yellow(`"${s.firstRejectExcerpt}"`)}`);
       }
     }
   }

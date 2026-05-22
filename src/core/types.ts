@@ -10,6 +10,9 @@ export type HumanReactionSignal = {
   plusOneCount: number;
   minusOneCount: number;
   firstRejectExcerpt?: string;
+  firstAgreementExcerpt?: string;
+  agreementAuthors?: string[];
+  rejectionAuthors?: string[];
 };
 
 export type RawReviewComment = {

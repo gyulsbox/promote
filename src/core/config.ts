@@ -65,12 +65,20 @@ const promoteConfigSchema = z.object({
 
   thresholds: z
     .object({
-      minOccurrences: z.number().int().min(2).default(3),
+      // 2 (was 3): on real repos at 60d windows, ≥3 was too strict — most
+      // clusters were singletons or pairs, leaving emerging patterns invisible.
+      // Counting pairs as "repeated" surfaces the second occurrence as a
+      // candidate so the user can decide whether it's worth promoting early.
+      minOccurrences: z.number().int().min(2).default(2),
       windowDays: z.number().int().min(1).default(60),
-      similarityThreshold: z.number().min(0).max(1).default(0.85),
+      // 0.80 (was 0.85): v0.3 bot-signature/markdown stripping removes a lot of
+      // shared boilerplate, lowering pairwise cosine similarity between semantically
+      // equivalent comments. llmRefine (margin 0.15) catches borderline pairs in
+      // [0.65, 0.80), keeping false-merges under control.
+      similarityThreshold: z.number().min(0).max(1).default(0.80),
       minConfidence: z.number().min(0).max(1).default(0.75),
     })
-    .default({ minOccurrences: 3, windowDays: 60, similarityThreshold: 0.85, minConfidence: 0.75 }),
+    .default({ minOccurrences: 2, windowDays: 60, similarityThreshold: 0.80, minConfidence: 0.75 }),
 
   llm: z
     .object({
@@ -131,9 +139,9 @@ export const DEFAULT_CONFIG_CONTENT = `version: 1
 #     mode: recommendation
 
 # thresholds:
-#   minOccurrences: 3
+#   minOccurrences: 2
 #   windowDays: 60
-#   similarityThreshold: 0.85
+#   similarityThreshold: 0.80
 #   minConfidence: 0.75
 
 # llm:

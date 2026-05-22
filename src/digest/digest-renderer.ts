@@ -1,9 +1,10 @@
-import type { PromotionCandidate, AnalysisStats } from "../core/types.js";
+import type { PromotionCandidate, AnalysisStats, PromoteConfig } from "../core/types.js";
 
 const TRANSLATIONS: Record<string, {
   title: string;
   generated: string;
   summary: string;
+  configuration: string;
   evidence: string;
   humanSignal: string;
   suggestedPatch: string;
@@ -16,6 +17,7 @@ const TRANSLATIONS: Record<string, {
     title: "Memory Promotion Digest",
     generated: "Generated on",
     summary: "Summary",
+    configuration: "Configuration",
     evidence: "Evidence",
     humanSignal: "Human signal",
     suggestedPatch: "Suggested patch",
@@ -28,6 +30,7 @@ const TRANSLATIONS: Record<string, {
     title: "메모리 승격 다이제스트",
     generated: "생성일:",
     summary: "요약",
+    configuration: "설정",
     evidence: "근거",
     humanSignal: "사람 반응",
     suggestedPatch: "제안된 패치",
@@ -40,6 +43,7 @@ const TRANSLATIONS: Record<string, {
     title: "メモリ昇格ダイジェスト",
     generated: "生成日:",
     summary: "概要",
+    configuration: "設定",
     evidence: "根拠",
     humanSignal: "ヒューマンシグナル",
     suggestedPatch: "提案パッチ",
@@ -55,6 +59,9 @@ export function renderDigest(
   stats: AnalysisStats,
   repo: string,
   language = "en",
+  config?: PromoteConfig,
+  embeddingMode?: boolean,
+  sinceDays?: number,
 ): string {
   const date = new Date().toISOString().split("T")[0];
   const lines: string[] = [];
@@ -63,6 +70,27 @@ export function renderDigest(
   lines.push(`# ${t.title} — ${repo}`);
   lines.push(`> ${t.generated} ${date}`);
   lines.push("");
+
+  // Configuration (so the digest is self-describing for later review)
+  if (config) {
+    lines.push(`## ${t.configuration}`);
+    lines.push("");
+    const llm = config.llm;
+    const clusteringMode = embeddingMode === false
+      ? "LLM-direct (no embedding API, llmRefine inactive)"
+      : "embeddings + HAC + llmRefine";
+    lines.push(`- Provider: \`${llm.provider}\` (${clusteringMode})`);
+    lines.push(`- Models: \`${llm.classificationModel}\` (classify), \`${llm.draftingModel}\` (draft)${embeddingMode !== false ? `, \`${llm.embeddingModel}\` (embed)` : ""}`);
+    lines.push(`- Output language: \`${config.language.preferredOutput}\``);
+    lines.push(`- Thresholds: similarity \`${config.thresholds.similarityThreshold}\`, min confidence \`${config.thresholds.minConfidence}\`, min occurrences \`${config.thresholds.minOccurrences}\``);
+    const effectiveWindow = sinceDays ?? config.thresholds.windowDays;
+    const windowSuffix = sinceDays !== undefined && sinceDays !== config.thresholds.windowDays
+      ? ` (overridden via --since; config default is ${config.thresholds.windowDays})`
+      : "";
+    lines.push(`- Window: \`${effectiveWindow}\` days${windowSuffix}`);
+    lines.push(`- Privacy: redactSecrets=\`${config.privacy.redactSecrets}\`, sendDiffHunksToLLM=\`${config.privacy.sendDiffHunksToLLM}\``);
+    lines.push("");
+  }
 
   // Stats
   lines.push(`## ${t.summary}`);
@@ -87,9 +115,12 @@ export function renderDigest(
     const c = candidates[i];
     lines.push(`## ${i + 1}. ${c.summary}`);
     lines.push("");
+    const uniquePrs = new Set(c.occurrences.map((o) => o.prNumber)).size;
+    const scope = uniquePrs >= 2 ? `🌐 cross-PR (${uniquePrs} PRs)` : `📍 within-PR (1 PR)`;
     lines.push(`- **ID**: \`${c.id}\``);
     lines.push(`- **Target**: \`${c.target}\` → \`${c.suggestedFile ?? "(auto)"}\``);
     lines.push(`- **Confidence**: ${c.confidence}`);
+    lines.push(`- **Scope**: ${scope}`);
     lines.push(`- **Occurrences**: ${c.occurrences.length} comments`);
     if (c.pathScope) {
       lines.push(`- **Path scope**: \`${c.pathScope}\``);
@@ -115,11 +146,18 @@ export function renderDigest(
       if (hasSignal) {
         lines.push(`### ${t.humanSignal}`);
         lines.push("");
-        if (s.agreementCount > 0) lines.push(`- Agreed: **${s.agreementCount}** reviewer(s)`);
-        if (s.rejectionCount > 0) lines.push(`- Dismissed: **${s.rejectionCount}** reviewer(s) (e.g. "by design", "special case")`);
+        if (s.agreementCount > 0) {
+          const who = s.agreementAuthors?.length ? ` (${s.agreementAuthors.map((a) => `@${a}`).join(", ")})` : "";
+          lines.push(`- Agreed: **${s.agreementCount}** reviewer(s)${who}`);
+          if (s.firstAgreementExcerpt) lines.push(`  - First agreement: *"${s.firstAgreementExcerpt}"*`);
+        }
+        if (s.rejectionCount > 0) {
+          const who = s.rejectionAuthors?.length ? ` (${s.rejectionAuthors.map((a) => `@${a}`).join(", ")})` : "";
+          lines.push(`- Dismissed: **${s.rejectionCount}** reviewer(s)${who}`);
+          if (s.firstRejectExcerpt) lines.push(`  - First dismissal: *"${s.firstRejectExcerpt}"*`);
+        }
         if (s.plusOneCount > 0) lines.push(`- 👍 ${s.plusOneCount}`);
         if (s.minusOneCount > 0) lines.push(`- 👎 ${s.minusOneCount}`);
-        if (s.firstRejectExcerpt) lines.push(`- Dismissal context: *"${s.firstRejectExcerpt}"*`);
         lines.push("");
       }
     }

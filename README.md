@@ -262,9 +262,10 @@ memoryTargets:
 #   - coderabbitai[bot]
 
 thresholds:
-  minOccurrences: 3
+  minOccurrences: 2          # total comments per cluster; each candidate is tagged
+                             #   "cross-PR" (2+ distinct PRs) or "within-PR" (1 PR)
   windowDays: 60
-  similarityThreshold: 0.85
+  similarityThreshold: 0.80  # llmRefine merges borderline pairs in [0.65, 0.80) via LLM
   minConfidence: 0.75
 
 llm:

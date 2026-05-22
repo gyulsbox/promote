@@ -67,11 +67,24 @@ export async function runScan(options: ScanOptions) {
   const sinceDate = computeSinceDate(sinceDays);
 
   mascotSays(`Scanning ${repo.fullName} (last ${sinceDays} days)`);
-  out.divider();
 
   const octokit = createOctokit();
   const models = resolveModels(config.llm);
   const costTracker = new CostTracker(config.llm.classificationModel);
+
+  const llmOnly = !models.embeddingModel;
+  out.stat(
+    "Provider",
+    `${config.llm.provider}${llmOnly ? " (LLM-direct clustering — no embedding API, llmRefine inactive)" : " (embeddings + HAC + llmRefine)"}`,
+  );
+  out.stat(
+    "Models",
+    llmOnly
+      ? `${config.llm.classificationModel} (classify) + ${config.llm.draftingModel} (draft)`
+      : `${config.llm.classificationModel} (classify) + ${config.llm.draftingModel} (draft) + ${config.llm.embeddingModel} (embed)`,
+  );
+  out.stat("Output language", config.language.preferredOutput);
+  out.divider();
 
   // 1. Fetch
   const fetchSpinner = out.spinner("Fetching review comments...");
@@ -136,10 +149,33 @@ export async function runScan(options: ScanOptions) {
   const modeLabel = mode === "llm" ? "LLM direct" : "embedding";
   clusterSpinner.succeed(`Found ${clusters.length} clusters (${modeLabel}) ${chalk.dim(`(${clusterTimer.getElapsed()}s)`)}`);
 
+  // "Repeated" = total members >= minOccurrences. Cross-PR (members from 2+
+  // distinct PRs) is the higher-value signal for repository memory; within-PR
+  // (chatty bot in one review) is lower priority but still valid as duplicate
+  // evidence. Both are surfaced; the scope is shown per candidate so users can
+  // visually prioritize.
   const repeatedClusters = clusters.filter(
     (c) => c.members.length >= config.thresholds.minOccurrences,
   );
-  out.stat("Repeated clusters", `${repeatedClusters.length} (>= ${config.thresholds.minOccurrences} occurrences)`);
+  const crossPrCount = repeatedClusters.filter(
+    (c) => new Set(c.members.map((m) => m.prNumber)).size >= 2,
+  ).length;
+  const withinPrCount = repeatedClusters.length - crossPrCount;
+  out.stat(
+    "Repeated clusters",
+    `${repeatedClusters.length} (>= ${config.thresholds.minOccurrences} members)${
+      repeatedClusters.length > 0
+        ? chalk.dim(` · ${crossPrCount} cross-PR, ${withinPrCount} within-PR`)
+        : ""
+    }`,
+  );
+
+  // Sort: cross-PR clusters (higher-value signal) come first
+  repeatedClusters.sort((a, b) => {
+    const aPrs = new Set(a.members.map((m) => m.prNumber)).size;
+    const bPrs = new Set(b.members.map((m) => m.prNumber)).size;
+    return bPrs - aPrs;
+  });
 
   if (repeatedClusters.length === 0) {
     out.divider();
@@ -156,6 +192,24 @@ export async function runScan(options: ScanOptions) {
   } catch {
     replyContextMap = new Map();
   }
+
+  // Coverage diagnostic: how many bot comments actually received a human reply
+  // or reaction? Low coverage explains sparse Human signal blocks in the digest.
+  // Note: this endpoint (pulls.listReviewCommentsForRepo) returns line-comments
+  // only; general PR conversation lives in issues.listComments and is not fetched.
+  let botsWithReply = 0;
+  let botsWithReaction = 0;
+  for (const ctx of replyContextMap.values()) {
+    if (ctx.replies.length > 0) botsWithReply++;
+    if (ctx.reactions.plusOne + ctx.reactions.minusOne > 0) botsWithReaction++;
+  }
+  out.stat(
+    "Human signal coverage",
+    `${botsWithReply} replies + ${botsWithReaction} reactions / ${ai.length} bot comments` +
+      (botsWithReply + botsWithReaction === 0
+        ? chalk.dim(" (most resolved silently; general PR conversation not fetched)")
+        : ""),
+  );
 
   // 7. Scan existing memory
   const memSpinner = out.spinner("Scanning existing memory files...");
@@ -433,7 +487,15 @@ export async function runScan(options: ScanOptions) {
     estimatedCostUSD: cost.estimatedCostUSD,
   };
 
-  const digest = renderDigest(candidates, stats, repo.fullName, config.language.preferredOutput);
+  const digest = renderDigest(
+    candidates,
+    stats,
+    repo.fullName,
+    config.language.preferredOutput,
+    config,
+    !llmOnly,
+    sinceDays,
+  );
   const digestDir = resolve(process.cwd(), ".promote", "digests");
   if (!existsSync(digestDir)) {
     mkdirSync(digestDir, { recursive: true });
@@ -480,7 +542,11 @@ export async function runScan(options: ScanOptions) {
       ],
     });
 
-    if (p.isCancel(remoteAction) || remoteAction === "digest-only") {
+    if (p.isCancel(remoteAction)) {
+      out.info("Cancelled.");
+      process.exit(130);
+    }
+    if (remoteAction === "digest-only") {
       out.info(`Digest saved: ${chalk.bold(digestPath)}`);
       out.info("Clone the target repo and run promote there to apply changes.");
       return;
@@ -495,7 +561,11 @@ export async function runScan(options: ScanOptions) {
     ],
   });
 
-  if (p.isCancel(reviewNow) || reviewNow === "later") {
+  if (p.isCancel(reviewNow)) {
+    out.info("Cancelled.");
+    process.exit(130);
+  }
+  if (reviewNow === "later") {
     out.info(`Digest: ${chalk.bold(digestPath)}`);
     out.info(`Promote later: ${chalk.dim("promote candidate_001")}  ${chalk.dim("# or: promote review")}`);
     return;

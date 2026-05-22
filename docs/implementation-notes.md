@@ -109,10 +109,19 @@ Comments are sorted before clustering:
 - Embedding mode: by L2 norm descending — most information-rich comments seed clusters first
 - LLM mode: by `normalizedBody.length` descending — addresses "The Order Effect" (arXiv:2502.04134)
 
-### B-3. Threshold default 0.82 → 0.85
+### B-3. Threshold default 0.82 → 0.85 → 0.80
 **File**: `src/core/config.ts`
 
-Code review comments have narrow vocabulary; mean pairwise cosine similarity is higher than general prose. 0.85 reduces false-positive merges with `text-embedding-3` models.
+History:
+- v0.1: 0.82 — baseline for `text-embedding-3-small`.
+- v0.2: 0.85 — bumped after observing false-positive merges in raw-text mode.
+- post-v0.3: **0.80** — v0.3 bot-signature/markdown stripping strips a large share
+  of shared boilerplate, which dropped pairwise cosine similarity between
+  genuinely repeated comments below 0.85. Empirically, embedding-mode scans on
+  trpc/trpc were under-clustering (119 clusters from 132 comments → 2 repeated),
+  while LLM-direct mode found 11. Lowered to 0.80 and widened llmRefine margin
+  to 0.15 (so the LLM yes/no covers pairs in [0.65, 0.80)) to recover recall
+  without compounding false-merges.
 
 ### B-4. HAC clustering
 **File**: `src/cluster/hac-cluster.ts` (new)
@@ -138,6 +147,16 @@ For Anthropic-only mode (no embedding API): cluster in batches of 30, extract a 
 **File**: `src/cluster/llm-refine.ts` (new)
 
 After HAC, find pairs whose similarity falls within `threshold ± 0.05` and ask the LLM yes/no whether they belong to the same pattern. Merges only on positive response. Implements the LLMEdgeRefine pattern (EMNLP 2024).
+
+### B-8. Cross-PR vs within-PR scope labeling
+**Files**: `src/cli/commands/scan.ts`, `src/core/engine.ts`, `src/digest/digest-renderer.ts`, `src/cli/commands/review.ts`
+
+`minOccurrences` filters on `cluster.members.length` (total similar comments). On top of that we compute scope:
+
+- **cross-PR**: members from 2+ distinct PRs — the high-value signal for repository memory ("pattern recurs across separate reviews"). Sorted first.
+- **within-PR**: all members from a single PR — a chatty bot in one review. Still surfaced as a candidate, but flagged so the user can deprioritize visually.
+
+Scan output: `Repeated clusters: N (>= M members) · X cross-PR, Y within-PR`. Digest and review UI render `Scope: cross-PR (3 PRs)` or `Scope: within-PR (1 PR)` per candidate. Sorting puts cross-PR ahead in the candidate list so users see the strongest signals first.
 
 ---
 
@@ -232,6 +251,16 @@ PRD treated bot comments in isolation. In practice, human replies on bot comment
 - 👍 / 👎 reactions on bot comments → silent vote
 
 This block surfaces all three into the classification pipeline.
+
+### Coverage limitation
+
+Real-repo runs (trpc/trpc 120d, 389 bot comments) show only ~3% of bot comments receive a recorded reply or reaction. Three reasons:
+
+1. **Inline reply rate is low** — most bot review-line comments get resolved silently without a textual reply.
+2. **General PR conversation isn't fetched** — `pulls.listReviewCommentsForRepo` (our source) returns inline line-comments only. The general PR thread (`issues.listComments`) where humans more commonly write "lgtm" / "ignore this" is a separate endpoint and not currently merged into the signal pipeline.
+3. **Reactions on bot comments are rare** — humans tend to reply rather than 👍/👎 automated comments.
+
+Scan output prints a `Human signal coverage` line (`X replies + Y reactions / N bot comments`) so users can see the absolute numbers and not mistake sparse signal for a bug. Expanding to `issues.listComments` and joining by PR proximity is a reasonable v0.5 follow-up.
 
 ### D-1. New types
 **File**: `src/core/types.ts`
@@ -418,9 +447,9 @@ memoryTargets:
     dir: docs/adr
 
 thresholds:
-  minOccurrences: 3
+  minOccurrences: 2           # total members in cluster; scope (cross-PR/within-PR) — see B-8
   windowDays: 60
-  similarityThreshold: 0.85   # was 0.82
+  similarityThreshold: 0.80   # 0.82 → 0.85 (v0.2) → 0.80 (post-v0.3 stripping)
   minConfidence: 0.75
 
 llm:

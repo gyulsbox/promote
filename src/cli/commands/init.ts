@@ -117,8 +117,8 @@ export async function runInit() {
     message: "How strict should pattern matching be?",
     options: [
       { value: "0.85", label: "Strict", hint: "fewer but higher confidence matches" },
-      { value: "0.82", label: "Balanced (recommended)", hint: "default threshold" },
-      { value: "0.75", label: "Relaxed", hint: "more matches, some may be noisy" },
+      { value: "0.80", label: "Balanced (recommended)", hint: "default — catches most repeated patterns with llmRefine safety net" },
+      { value: "0.72", label: "Relaxed", hint: "more matches, more LLM refine calls" },
     ],
   });
 
@@ -425,7 +425,7 @@ memoryTargets:
 #   - sourcery-ai[bot]
 
 thresholds:
-  minOccurrences: 3
+  minOccurrences: 2
   windowDays: 60
   similarityThreshold: ${opts.threshold}
   minConfidence: 0.75

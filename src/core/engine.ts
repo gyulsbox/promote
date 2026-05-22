@@ -69,10 +69,17 @@ export async function analyzeReviewMemory(input: {
     onProgress: (msg) => onProgress("cluster", msg),
   });
 
-  // 5. Filter repeated
+  // 5. Filter repeated by total members; scope (cross-PR vs within-PR) is
+  // surfaced per candidate downstream rather than used as a hard filter.
   const repeatedClusters = clusters.filter(
     (c) => c.members.length >= config.thresholds.minOccurrences,
   );
+  // Sort cross-PR (higher-value) first
+  repeatedClusters.sort((a, b) => {
+    const aPrs = new Set(a.members.map((m) => m.prNumber)).size;
+    const bPrs = new Set(b.members.map((m) => m.prNumber)).size;
+    return bPrs - aPrs;
+  });
 
   // 6. Scan existing memory
   onProgress("memory", "Scanning existing memory files...");

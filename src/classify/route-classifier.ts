@@ -80,7 +80,12 @@ export async function classifyCluster(input: {
   const { object, usage } = await generateObject({
     model,
     schema: routingDecisionSchema,
+    // OpenAI's structured-outputs strict mode rejects .optional/.min/.max constraints
+    // that our schema legitimately uses. Disable strict mode for OpenAI; Anthropic/Google
+    // ignore this option and continue to use their native tool-use paths.
+    providerOptions: { openai: { strictJsonSchema: false } },
     temperature: 0,
+    seed: 1,
     system: CLASSIFICATION_SYSTEM_PROMPT,
     prompt,
   });

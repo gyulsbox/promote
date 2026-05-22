@@ -40,7 +40,11 @@ export async function applyPromotion(
       message: `${targetFile} doesn't exist. Create it?`,
     });
 
-    if (p.isCancel(create) || !create) {
+    if (p.isCancel(create)) {
+      out.info("Cancelled.");
+      process.exit(130);
+    }
+    if (!create) {
       out.info(`Skipped ${candidate.id}. Create the file manually and run again.`);
       return;
     }
@@ -103,8 +107,12 @@ export async function runPromote(candidateId: string, options: PromoteOptions) {
     message: `Apply to ${chalk.bold(targetFile)}?`,
   });
 
-  if (p.isCancel(confirmed) || !confirmed) {
+  if (p.isCancel(confirmed)) {
     out.info("Cancelled.");
+    process.exit(130);
+  }
+  if (!confirmed) {
+    out.info("Skipped.");
     return;
   }
 
@@ -178,7 +186,11 @@ export async function runReview(options: { config?: string }) {
     required: false,
   });
 
-  if (p.isCancel(selected) || (selected as string[]).length === 0) {
+  if (p.isCancel(selected)) {
+    out.info("Cancelled.");
+    process.exit(130);
+  }
+  if ((selected as string[]).length === 0) {
     out.info("Nothing selected.");
     return;
   }

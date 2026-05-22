@@ -6,10 +6,19 @@ import { initDatabase } from "./storage/db.js";
 import { updateCandidateStatus } from "./storage/repositories.js";
 import * as out from "./cli/output.js";
 
+// SIGINT: write to stderr (bypasses stdout buffering held by ora/clack spinners),
+// restore cursor (ora hides it by default), exit with conventional 130.
+// Second Ctrl+C inside the same process forces an immediate kill in case the first
+// exit gets stuck waiting on in-flight HTTP sockets to flush.
+let sigintCount = 0;
 process.on("SIGINT", () => {
-  console.log();
-  out.info("Interrupted. Bye!");
-  process.exit(0);
+  sigintCount++;
+  if (sigintCount === 1) {
+    process.stderr.write("\n\x1b[?25h\x1b[31m✗\x1b[0m Interrupted.\n");
+    process.exit(130);
+  } else {
+    process.kill(process.pid, "SIGKILL");
+  }
 });
 
 const program = new Command();

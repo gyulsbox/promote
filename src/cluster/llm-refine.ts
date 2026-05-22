@@ -58,7 +58,9 @@ export async function llmRefine(input: {
       const { object, usage } = await generateObject({
         model,
         schema: mergeDecisionSchema,
+        providerOptions: { openai: { strictJsonSchema: false } },
         temperature: 0,
+        seed: 1,
         prompt: `Should these two AI code review comment patterns be considered the same recurring issue?\n\nPattern A: ${iBody}\n\nPattern B: ${jBody}\n\nAnswer true only if they describe the exact same code quality concern.`,
       });
 

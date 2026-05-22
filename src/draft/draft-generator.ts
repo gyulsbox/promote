@@ -71,6 +71,8 @@ export async function generateDraft(input: {
 
   const { text, usage } = await generateText({
     model,
+    temperature: 0,
+    seed: 1,
     system: templatePrompt,
     prompt: `Based on these repeated review comments, generate the appropriate content.
 

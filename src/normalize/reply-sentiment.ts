@@ -71,7 +71,9 @@ export async function classifyAmbiguousReplies(
   const { object, usage } = await generateObject({
     model,
     schema: batchSchema,
+    providerOptions: { openai: { strictJsonSchema: false } },
     temperature: 0,
+    seed: 1,
     system:
       "Classify each reviewer reply as agree (supportive/fixed), reject (dismissive/special-case), or neutral. Return id and sentiment for each.",
     prompt: `Classify these human replies to an AI code review comment:\n\n${list}`,

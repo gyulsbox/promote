@@ -88,13 +88,16 @@ export async function preCluster(input: PreClusterInput): Promise<PreClusterOutp
       ? hacCluster(sortedComments, sortedEmbeddings, input.similarityThreshold)
       : greedyCluster(sortedComments, sortedEmbeddings, input.similarityThreshold);
 
-  // LLMEdgeRefine (EMNLP 2024): merge borderline pairs (similarity within threshold ± 0.05)
-  // via LLM yes/no. Only runs when we have ≥ 2 clusters with embeddings (HAC path).
+  // LLMEdgeRefine (EMNLP 2024): merge borderline pairs whose similarity sits in
+  // [threshold - margin, threshold) via LLM yes/no. margin 0.15 is wide because
+  // bot-stripped review comments often score well below 0.80 even when semantically
+  // identical; the LLM judges the actually-borderline merges.
   if (clusters.length >= 2 && sortedComments.length <= 500) {
     onProgress?.("Refining borderline clusters...");
     clusters = await llmRefine({
       clusters,
       threshold: input.similarityThreshold,
+      margin: 0.15,
       model: classificationModel,
       costTracker,
     });
