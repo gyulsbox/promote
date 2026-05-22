@@ -8,6 +8,7 @@ import {
   buildSinglePrBody,
   buildBundledPrTitle,
   buildSinglePrTitle,
+  formatConfidence,
 } from "./template.js";
 import type { PromotionCandidate } from "../core/types.js";
 
@@ -179,6 +180,23 @@ describe("buildSinglePrBody", () => {
     expect(body).toContain("## Custom");
     expect(body).toContain("LLM-filled.");
     expect(body).toContain("## Memory promotion details");
+  });
+});
+
+describe("formatConfidence", () => {
+  it("trims float artifacts to 2 decimals", () => {
+    // 0.9 + 0.05 in IEEE 754 → 0.9500000000000001
+    expect(formatConfidence(0.9 + 0.05)).toBe("0.95");
+  });
+
+  it("preserves trailing zeros", () => {
+    expect(formatConfidence(0.9)).toBe("0.90");
+    expect(formatConfidence(1)).toBe("1.00");
+  });
+
+  it("rounds correctly at the boundary", () => {
+    expect(formatConfidence(0.755)).toBe("0.76");
+    expect(formatConfidence(0.754)).toBe("0.75");
   });
 });
 
