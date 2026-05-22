@@ -15,7 +15,7 @@ import { createOctokit } from "../../ingest/github-client.js";
 import { buildSingleBranchName } from "../../pr/branch.js";
 import { findPullRequestTemplate, buildSinglePrBody, buildSinglePrTitle } from "../../pr/template.js";
 import { fillTemplateWithLlm } from "../../pr/llm-fill.js";
-import { createPullRequest, hasGhCli, isGhAuthenticated } from "../../pr/create.js";
+import { finalizePr, hasGhCli, isGhAuthenticated, prepareBranchForPr, rollbackBranch, restoreOriginalBranch } from "../../pr/create.js";
 import { resolveModels } from "../../llm/provider.js";
 import { CostTracker } from "../../llm/cost-tracker.js";
 
@@ -140,18 +140,36 @@ export async function runPromote(candidateId: string, options: PromoteOptions) {
     return;
   }
 
-  const result = await applyPromotion(candidate, target);
-  if (!result.applied) {
+  if (!options.createPr) {
+    // Legacy path: apply locally, mark promoted. No PR.
+    const result = await applyPromotion(candidate, target);
+    if (!result.applied) {
+      return;
+    }
+    updateCandidateStatus(db, candidateId, "promoted");
     return;
   }
-  updateCandidateStatus(db, candidateId, "promoted");
 
-  if (options.createPr) {
-    await openSinglePr(candidate, result.targetFile, options.baseBranch);
-  }
+  // Atomic --create-pr: prepare branch → apply → finalize. DB status flips
+  // and original-branch restore only happen after PR creation succeeds.
+  await applyAndOpenSinglePr({
+    candidate,
+    target,
+    db,
+    candidateId,
+    baseBranch: options.baseBranch,
+    config,
+  });
 }
 
-async function openSinglePr(candidate: PromotionCandidate, targetFile: string, baseBranch?: string) {
+async function applyAndOpenSinglePr(input: {
+  candidate: PromotionCandidate;
+  target: string;
+  db: ReturnType<typeof initDatabase>["db"];
+  candidateId: string;
+  baseBranch?: string;
+  config: ReturnType<typeof loadConfig>;
+}) {
   const ghAvailable = hasGhCli() && isGhAuthenticated();
   if (!ghAvailable && !process.env.GITHUB_TOKEN) {
     out.error("`gh` CLI not authenticated and GITHUB_TOKEN not set — cannot open a PR.");
@@ -160,34 +178,46 @@ async function openSinglePr(candidate: PromotionCandidate, targetFile: string, b
   }
 
   const localRepo = detectLocalRepoSilent();
-  const prRepo = localRepo ?? candidate.repo;
-  if (localRepo && localRepo !== candidate.repo) {
-    out.info(`PR target: ${chalk.bold(localRepo)} (candidate's source repo was ${candidate.repo}).`);
+  const prRepo = localRepo ?? input.candidate.repo;
+  if (localRepo && localRepo !== input.candidate.repo) {
+    out.info(`PR target: ${chalk.bold(localRepo)} (candidate's source repo was ${input.candidate.repo}).`);
   }
 
-  const octokit = ghAvailable ? undefined : createOctokit();
-  const config = loadConfig();
   const date = new Date();
-  const branch = buildSingleBranchName(candidate.id, date);
-  const title = buildSinglePrTitle({ summary: candidate.summary });
+  const branchName = buildSingleBranchName(input.candidate.id, date);
+  const ctx = prepareBranchForPr({ branch: branchName, baseBranch: input.baseBranch });
+
+  let targetFile: string;
+  try {
+    const result = await applyPromotion(input.candidate, input.target);
+    if (!result.applied) {
+      rollbackBranch(ctx, []);
+      return;
+    }
+    targetFile = result.targetFile;
+  } catch (err) {
+    rollbackBranch(ctx, []);
+    throw err;
+  }
+
   const template = findPullRequestTemplate();
-  const candidateWithFile = { ...candidate, targetFile };
+  const candidateWithFile = { ...input.candidate, targetFile };
 
   let prefilledHeader: string | undefined;
   if (template) {
     const fillSpin = out.spinner(`Filling ${template.path} with LLM...`);
     try {
-      const models = resolveModels(config.llm);
-      const costTracker = new CostTracker(config.llm.draftingModel);
+      const models = resolveModels(input.config.llm);
+      const costTracker = new CostTracker(input.config.llm.draftingModel);
       prefilledHeader = await fillTemplateWithLlm({
         templateBody: template.body,
         facts: {
           candidates: [candidateWithFile],
-          sinceDays: config.thresholds.windowDays,
+          sinceDays: input.config.thresholds.windowDays,
         },
         model: models.draftingModel,
         costTracker,
-        outputLanguage: config.language.preferredOutput,
+        outputLanguage: input.config.language.preferredOutput,
       });
       fillSpin.succeed(`Filled ${template.path} (LLM)`);
     } catch (err) {
@@ -203,23 +233,27 @@ async function openSinglePr(candidate: PromotionCandidate, targetFile: string, b
     date,
     prefilledHeader,
   });
+  const title = buildSinglePrTitle({ summary: input.candidate.summary });
 
   out.divider();
   const spin = out.spinner(`Opening PR via ${ghAvailable ? "gh" : "octokit"}...`);
   try {
-    const result = await createPullRequest({
-      branch,
+    const octokit = ghAvailable ? undefined : createOctokit();
+    const result = await finalizePr({
+      context: ctx,
       title,
       body,
       files: [targetFile],
       repo: prRepo,
-      baseBranch,
       labels: ["memory-promotion"],
       octokit,
     });
     spin.succeed(`PR opened: ${result.url}`);
+    updateCandidateStatus(input.db, input.candidateId, "promoted");
+    restoreOriginalBranch(ctx);
   } catch (err) {
     spin.fail("PR creation failed.");
+    rollbackBranch(ctx, [targetFile]);
     throw err;
   }
 }
