@@ -142,6 +142,16 @@ export type AnalysisStats = {
   promptTokens: number;
   completionTokens: number;
   estimatedCostUSD: number;
+  timings?: {
+    fetchMs: number;
+    normalizeMs: number;
+    clusterMs: number;
+    conversationFetchMs: number;
+    replyContextMs: number;
+    memoryScanMs: number;
+    classifyDraftMs: number;
+    totalMs: number;
+  };
 };
 
 export type AnalyzeReviewMemoryInput = {

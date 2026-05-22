@@ -48,10 +48,34 @@ export async function llmCluster(input: {
  * call" failure mode where ~150 representatives in one prompt overflowed the
  * model's reliable structured-output budget.
  */
-// Concurrent LLM calls per depth. 3 keeps us inside common rate limits while
-// hiding per-call latency for large repos (a 120d trpc scan with 26 batches
-// drops from ~4 minutes to ~80s of cluster wall time).
-const CLUSTER_CONCURRENCY = 3;
+// Concurrent LLM calls per depth. Provider+model-aware because tier-1 rate
+// limits collapse under parallel batching on the *large* model variants of
+// every provider:
+//   Anthropic: 50 req / 50k input-tokens per minute (every Claude model)
+//   OpenAI gpt-4.1, gpt-4o, gpt-5 (full): 30k TPM
+//   OpenAI gpt-4.1-mini/nano, gpt-4o-mini: ~200k+ TPM (tier 1)
+//   Google Gemini Flash / Flash-Lite: generous free-tier limits
+// 3-way parallel on a tier-1 large model trips TPM within ~10s and cascades
+// into retry floods; concurrency=1 keeps the per-minute token budget honest.
+const CLUSTER_CONCURRENCY_DEFAULT = 3;
+const CLUSTER_CONCURRENCY_RATE_LIMITED = 1;
+
+function isLargeOpenAIModel(modelId: string): boolean {
+  if (!/^gpt-(4|5)/.test(modelId)) return false;
+  // mini / nano / chat-latest variants ship with much higher tier-1 limits
+  if (/(mini|nano|chat-latest)/.test(modelId)) return false;
+  return true;
+}
+
+function clusterConcurrency(model: LanguageModel): number {
+  const provider = (model as { provider?: string }).provider ?? "";
+  const modelId = (model as { modelId?: string }).modelId ?? "";
+  if (provider.startsWith("anthropic")) return CLUSTER_CONCURRENCY_RATE_LIMITED;
+  if (provider.startsWith("openai") && isLargeOpenAIModel(modelId)) {
+    return CLUSTER_CONCURRENCY_RATE_LIMITED;
+  }
+  return CLUSTER_CONCURRENCY_DEFAULT;
+}
 
 // Hard cap on recursion depth. Beyond this we bail out — protects against
 // runaway cost in scenarios where the model can't produce schema-valid output
@@ -99,8 +123,9 @@ async function clusterRecursive(
     }
   };
 
+  const concurrency = clusterConcurrency(model);
   const workers: Promise<void>[] = [];
-  for (let i = 0; i < Math.min(CLUSTER_CONCURRENCY, queue.length); i++) {
+  for (let i = 0; i < Math.min(concurrency, queue.length); i++) {
     workers.push(runWorker());
   }
   await Promise.all(workers);
@@ -190,11 +215,30 @@ async function singlePassCluster(
       maxOutputTokens: MAX_OUTPUT_TOKENS,
       ...temperatureIfSupported(model),
       ...seedIfSupported(model),
-      system: `You group similar AI code review comments together.
-Two comments are similar if they point out the same issue, convention, or pattern — even if worded differently or in different languages.
-Do NOT group comments that are about different topics just because they mention the same file.
-Be conservative: only group comments that are genuinely about the same underlying point.
-Every comment must appear in exactly one group. Single-comment groups are fine.`,
+      system: `You group AI code review comments that would ALL be addressed by the SAME rule, convention, or fix.
+
+TWO criteria must BOTH apply to merge comments:
+1. SAME ACTION — they all recommend the same operation ("use X instead of Y", "validate X", "rename to X", "extract to helper Y").
+2. SAME INTENT — solving them together would mean writing one rule, not two. If two comments would require separate rules in AGENTS.md / ADR / path-scoped doc, they DO NOT belong together.
+
+DO NOT merge when:
+- Same file but different fixes (one about null-checks, one about types — different groups).
+- Same feature area but different problems (one about error handling, one about test setup).
+- Shared keywords but different root causes ("missing X" can mean very different things).
+- "Various issues in X" — heterogeneous bags are NOT a group; split them.
+
+PREFER singleton groups when in doubt. A singleton is fine. Merging unrelated comments wastes downstream effort because the classifier will throw the group away.
+
+Examples of CORRECT grouping:
+- "Use shared API client in src/auth.ts" + "Replace direct fetch with the API client in src/billing.ts" → one group (same action, same intent).
+- "Add null check before accessing config.timeout" + "Add null check before accessing options.maxRetries" → one group (same action: defensive null guard before optional property access).
+
+Examples of INCORRECT grouping (DO NOT do this):
+- "Add null check in src/auth.ts" + "Add error logging in src/auth.ts" → DIFFERENT groups (different actions).
+- "@ts-expect-error needs description" + "Use namespace React import" → DIFFERENT groups (different conventions).
+- Three comments each describing a different bug in the same function → DIFFERENT groups, even if they touch the same file.
+
+Every comment must appear in exactly one group. Single-comment groups are expected and encouraged.`,
       prompt: `Group these ${comments.length} AI review comments by similarity:\n\n${commentList}`,
     });
 

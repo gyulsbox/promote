@@ -61,6 +61,18 @@ export type ScanOptions = {
 };
 
 export async function runScan(options: ScanOptions) {
+  const runStartedAt = Date.now();
+  const timings = {
+    fetchMs: 0,
+    normalizeMs: 0,
+    clusterMs: 0,
+    conversationFetchMs: 0,
+    replyContextMs: 0,
+    memoryScanMs: 0,
+    classifyDraftMs: 0,
+    totalMs: 0,
+  };
+
   await notifyIfOutdated();
   const config = loadConfig(options.config);
 
@@ -134,9 +146,9 @@ export async function runScan(options: ScanOptions) {
     }
     if (choice === "switch") {
       config.llm.provider = "openai";
-      config.llm.classificationModel = "gpt-5.4-mini";
-      config.llm.clusteringModel = "gpt-5.4-mini";
-      config.llm.draftingModel = "gpt-5.4-nano";
+      config.llm.classificationModel = "gpt-4.1-mini";
+      config.llm.clusteringModel = "gpt-4.1-mini";
+      config.llm.draftingModel = "gpt-4.1-nano";
       config.llm.embeddingModel = "text-embedding-3-small";
       out.info("Switched to OpenAI for this scan.");
     }
@@ -166,11 +178,13 @@ export async function runScan(options: ScanOptions) {
   out.divider();
 
   // 1. Fetch
+  const fetchT0 = Date.now();
   const fetchSpinner = out.spinner("Fetching review comments...");
   const allComments = await fetchReviewComments(octokit, repo, sinceDate, (count) => {
     fetchSpinner.text = `Fetching review comments... ${chalk.dim(`(${count})`)}`;
   });
-  fetchSpinner.succeed(`Fetched ${allComments.length} review comments`);
+  timings.fetchMs = Date.now() - fetchT0;
+  fetchSpinner.succeed(`Fetched ${allComments.length} review comments ${chalk.dim(`(${out.fmtDuration(timings.fetchMs)})`)}`);
 
   if (allComments.length === 0) {
     mascotSays("No review comments found.");
@@ -202,14 +216,17 @@ export async function runScan(options: ScanOptions) {
   }
 
   // 4. Normalize
+  const normalizeT0 = Date.now();
   const normalizeSpinner = out.spinner("Normalizing...");
   const normalized = normalizeComments(kept);
-  normalizeSpinner.succeed(`Normalized ${normalized.length} comments`);
+  timings.normalizeMs = Date.now() - normalizeT0;
+  normalizeSpinner.succeed(`Normalized ${normalized.length} comments ${chalk.dim(`(${out.fmtDuration(timings.normalizeMs)})`)}`);
 
   const uniquePrs = new Set(normalized.map((c) => c.prNumber));
   out.stat("PRs scanned", uniquePrs.size);
 
   // 5. Pre-cluster
+  const clusterT0 = Date.now();
   const clusterSpinner = out.spinner("");
   // When the cluster step reports real progress (LLM-direct path emits
   // "[depth N] Batch X/Y..." lines), prefer that over the rotating mascot
@@ -233,8 +250,9 @@ export async function runScan(options: ScanOptions) {
     },
   });
   clusterTimer.stop();
+  timings.clusterMs = Date.now() - clusterT0;
   const modeLabel = mode === "llm" ? "LLM direct" : "embedding";
-  clusterSpinner.succeed(`Found ${clusters.length} clusters (${modeLabel}) ${chalk.dim(`(${clusterTimer.getElapsed()}s)`)}`);
+  clusterSpinner.succeed(`Found ${clusters.length} clusters (${modeLabel}) ${chalk.dim(`(${out.fmtDuration(timings.clusterMs)})`)}`);
 
   // "Repeated" = total members >= minOccurrences. Cross-PR (members from 2+
   // distinct PRs) is the higher-value signal for repository memory; within-PR
@@ -277,15 +295,19 @@ export async function runScan(options: ScanOptions) {
   // General comments lack in_reply_to_id, so they're matched to specific bot
   // comments via a per-PR LLM call (skipped when the PR has only one bot comment).
   const prNumbers = new Set(ai.map((c) => c.prNumber));
+  const convT0 = Date.now();
   const convSpinner = out.spinner("Fetching PR conversation comments...");
   let generalHuman: typeof ai = [];
   try {
     generalHuman = await fetchPrConversationComments(octokit, repo, prNumbers, sinceDate, config.aiReviewers);
-    convSpinner.succeed(`Fetched ${generalHuman.length} human PR conversation comment(s)`);
+    timings.conversationFetchMs = Date.now() - convT0;
+    convSpinner.succeed(`Fetched ${generalHuman.length} human PR conversation comment(s) ${chalk.dim(`(${out.fmtDuration(timings.conversationFetchMs)})`)}`);
   } catch (err) {
+    timings.conversationFetchMs = Date.now() - convT0;
     convSpinner.fail(`Failed to fetch PR conversation comments: ${err instanceof Error ? err.message : String(err)}`);
   }
 
+  const matchT0 = Date.now();
   const matchSpinner = out.spinner("Analyzing human reactions...");
   let replyContextMap: Awaited<ReturnType<typeof buildReplyContextMap>>;
   try {
@@ -296,8 +318,10 @@ export async function runScan(options: ScanOptions) {
       costTracker,
       generalHuman,
     );
-    matchSpinner.succeed("Analyzed human reactions");
+    timings.replyContextMs = Date.now() - matchT0;
+    matchSpinner.succeed(`Analyzed human reactions ${chalk.dim(`(${out.fmtDuration(timings.replyContextMs)})`)}`);
   } catch (err) {
+    timings.replyContextMs = Date.now() - matchT0;
     replyContextMap = new Map();
     matchSpinner.fail(`Failed to analyze human reactions: ${err instanceof Error ? err.message : String(err)}`);
   }
@@ -319,13 +343,14 @@ export async function runScan(options: ScanOptions) {
   );
 
   // 7. Scan existing memory
+  const memT0 = Date.now();
   const memSpinner = out.spinner("Scanning existing memory files...");
   const memoryContext = await scanExistingMemory(octokit, repo, config.memoryTargets);
-  memSpinner.succeed(
-    memoryContext.files.length > 0
-      ? `Found ${memoryContext.files.length} existing memory file(s)`
-      : "No existing memory files found",
-  );
+  timings.memoryScanMs = Date.now() - memT0;
+  const memBase = memoryContext.files.length > 0
+    ? `Found ${memoryContext.files.length} existing memory file(s)`
+    : "No existing memory files found";
+  memSpinner.succeed(`${memBase} ${chalk.dim(`(${out.fmtDuration(timings.memoryScanMs)})`)}`);
 
   // 8. Pre-assign stable candidate IDs from SQLite
   // Same cluster fingerprint → same ID across scans. New clusters get max+1.
@@ -353,6 +378,7 @@ export async function runScan(options: ScanOptions) {
   }
 
   // 9. Classify + Draft (parallel with ordered output)
+  const classifyT0 = Date.now();
   const CONCURRENCY = 3;
   const total = repeatedClusters.length;
   const candidates: PromotionCandidate[] = [];
@@ -521,9 +547,16 @@ export async function runScan(options: ScanOptions) {
     running.push(runNext());
   }
   await Promise.all(running);
+  timings.classifyDraftMs = Date.now() - classifyT0;
 
   activeTimer.stop();
   activeSpinner.stop();
+
+  out.success(
+    `Classified + drafted ${total} cluster(s): ${candidates.length} promoted${
+      failedClusters > 0 ? `, ${failedClusters} failed` : ""
+    } ${chalk.dim(`(${out.fmtDuration(timings.classifyDraftMs)})`)}`,
+  );
 
   if (failedClusters > 0) {
     out.warn(`${failedClusters} cluster(s) failed during classify/draft and were skipped — see summary line above.`);
@@ -572,6 +605,10 @@ export async function runScan(options: ScanOptions) {
   out.stat("Total tokens", cost.totalPromptTokens + cost.totalCompletionTokens);
   out.stat("Estimated cost", `$${cost.estimatedCostUSD}`);
 
+  // Total wall time (per-step durations already printed in each succeed line)
+  timings.totalMs = Date.now() - runStartedAt;
+  out.stat("Total time", out.fmtDuration(timings.totalMs));
+
   out.divider();
 
   if (candidates.length === 0) {
@@ -592,6 +629,7 @@ export async function runScan(options: ScanOptions) {
     promptTokens: cost.totalPromptTokens,
     completionTokens: cost.totalCompletionTokens,
     estimatedCostUSD: cost.estimatedCostUSD,
+    timings,
   };
 
   const digest = renderDigest(

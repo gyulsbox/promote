@@ -1,6 +1,15 @@
 import type { PromotionCandidate, AnalysisStats, PromoteConfig } from "../core/types.js";
 import { NAME, VERSION } from "../version.js";
 
+function fmtMs(ms: number): string {
+  if (ms < 1000) return `${ms}ms`;
+  const s = ms / 1000;
+  if (s < 60) return `${s.toFixed(1)}s`;
+  const m = Math.floor(s / 60);
+  const rem = (s - m * 60).toFixed(0);
+  return `${m}m ${rem}s`;
+}
+
 const TRANSLATIONS: Record<string, {
   title: string;
   generated: string;
@@ -106,6 +115,12 @@ export function renderDigest(
   lines.push(`- Repeated clusters: **${stats.repeatedClusters}**`);
   lines.push(`- Promotion candidates: **${candidates.length}**`);
   lines.push(`- Estimated cost: $${stats.estimatedCostUSD}`);
+  if (stats.timings) {
+    const t2 = stats.timings;
+    lines.push(
+      `- Timings: fetch ${fmtMs(t2.fetchMs)} · normalize ${fmtMs(t2.normalizeMs)} · cluster ${fmtMs(t2.clusterMs)} · conv-fetch ${fmtMs(t2.conversationFetchMs)} · reply-ctx ${fmtMs(t2.replyContextMs)} · memory ${fmtMs(t2.memoryScanMs)} · classify+draft ${fmtMs(t2.classifyDraftMs)} · **total ${fmtMs(t2.totalMs)}**`,
+    );
+  }
   lines.push("");
   lines.push("---");
   lines.push("");

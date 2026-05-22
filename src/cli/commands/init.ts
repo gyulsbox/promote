@@ -129,26 +129,38 @@ export async function runInit() {
     process.exit(0);
   }
 
-  // 5b. Clustering mode — affects what KIND of patterns surface
-  const clusteringStrategy = await p.select({
-    message: "What kind of patterns do you want surfaced?",
-    options: [
-      {
-        value: "embedding",
-        label: "Quick (recommended for most users)",
-        hint: "embedding+HAC — narrow code-level patterns, cheap, fast",
-      },
-      {
-        value: "llm-direct",
-        label: "Broad — convention/principle patterns",
-        hint: "LLM-direct semantic clustering — costs more but extracts repo-wide rules",
-      },
-    ],
-  });
-
-  if (p.isCancel(clusteringStrategy)) {
-    p.cancel("Setup cancelled.");
-    process.exit(0);
+  // 5b. Clustering mode — affects what KIND of patterns surface.
+  // Anthropic has no embedding API, so 'quick' isn't an option there; the
+  // provider is forced into llm-direct mode regardless of this choice.
+  // Skip the prompt to avoid a misleading question.
+  let clusteringStrategy: string;
+  if (provider === "anthropic") {
+    clusteringStrategy = "llm-direct";
+    p.note(
+      "Anthropic has no embedding API — clustering will use LLM-direct (broader/principle-level patterns) automatically.",
+      "Clustering mode",
+    );
+  } else {
+    const choice = await p.select({
+      message: "What kind of patterns do you want surfaced?",
+      options: [
+        {
+          value: "embedding",
+          label: "Quick — code-level patterns (recommended)",
+          hint: "embedding + HAC, narrow patterns tied to specific files/lines, cheapest",
+        },
+        {
+          value: "llm-direct",
+          label: "Broad — convention / principle patterns",
+          hint: "LLM-direct semantic clustering, repo-wide rules, ~3x cost",
+        },
+      ],
+    });
+    if (p.isCancel(choice)) {
+      p.cancel("Setup cancelled.");
+      process.exit(0);
+    }
+    clusteringStrategy = choice as string;
   }
 
   // 6. Memory target — which AI tool's instruction format
@@ -473,40 +485,47 @@ privacy:
 function getDefaultModels(provider: string) {
   switch (provider) {
     case "openai":
-      // draft uses nano — text generation is mechanical, classify needs more
-      // judgment (path_scoped_rule vs agents vs adr) and gets the better tier.
+      // gpt-4.1-mini / gpt-4.1-nano are non-reasoning models — they produce
+      // structured output (zod-validated JSON) reliably and cheaply. The
+      // gpt-5.x family always reasons internally before answering, which
+      // destabilizes strict structured-output enforcement on our cluster
+      // schema. draft uses nano (~$0.10/M in) since text generation is
+      // mechanical; classify and cluster use mini (~$0.40/M in) for the
+      // slightly stronger judgment they need on routing decisions.
       return {
-        classification: "gpt-5.4-mini",
-        clustering: "gpt-5.4-mini",
-        drafting: "gpt-5.4-nano",
+        classification: "gpt-4.1-mini",
+        clustering: "gpt-4.1-mini",
+        drafting: "gpt-4.1-nano",
         embedding: "text-embedding-3-small",
       };
     case "anthropic":
-      // classify uses sonnet for nuanced routing decisions; cluster + draft
-      // use haiku since LLM-direct clustering is the bulk cost driver on
-      // anthropic (no embedding API) and the grouping/drafting decision is
-      // mechanical enough that it doesn't need sonnet.
+      // All-haiku default — haiku 4.5 handles our routing/clustering/drafting
+      // workload competently and is 3x cheaper input / 3x cheaper output than
+      // sonnet. Promoting cluster routing patterns isn't a deep-reasoning task;
+      // users who need sharper judgment can opt into sonnet/opus per .promote.yml.
       return {
-        classification: "claude-sonnet-4-6",
+        classification: "claude-haiku-4-5",
         clustering: "claude-haiku-4-5",
         drafting: "claude-haiku-4-5",
         embedding: "text-embedding-3-small",
       };
     case "google":
-      // 'latest' aliases auto-track Google's current generation (Gemini 3 Flash
-      // for the flash tier, Gemini 3.1 Flash-Lite for the cheaper draft tier).
-      // classify needs flash (judgment); draft uses flash-lite (mechanical).
+      // 'latest' aliases auto-track Google's current generation. All-flash-lite
+      // (~\$0.25/\$1.50 per M) is enough for the routing-style decisions this
+      // tool makes; Gemini 3 Flash adds capability that isn't needed here.
+      // Users wanting sharper output can swap to gemini-flash-latest per
+      // .promote.yml.
       return {
-        classification: "gemini-flash-latest",
-        clustering: "gemini-flash-latest",
+        classification: "gemini-flash-lite-latest",
+        clustering: "gemini-flash-lite-latest",
         drafting: "gemini-flash-lite-latest",
         embedding: "gemini-embedding-001",
       };
     default:
       return {
-        classification: "gpt-5.4-mini",
-        clustering: "gpt-5.4-mini",
-        drafting: "gpt-5.4-nano",
+        classification: "gpt-4.1-mini",
+        clustering: "gpt-4.1-mini",
+        drafting: "gpt-4.1-nano",
         embedding: "text-embedding-3-small",
       };
   }
