@@ -267,7 +267,11 @@ Then set the relevant secret in *Settings → Secrets and variables → Actions*
 
 - **PR creation** uses `gh` when available, with a transparent fallback to the GitHub REST API via `GITHUB_TOKEN` — so it works on both GitHub-hosted and self-hosted runners.
 - **PR template aware.** If your repo has a `PULL_REQUEST_TEMPLATE.md` (in `.github/`, repo root, or `docs/`), the LLM fills the template's section bodies (preserving checkboxes and unknown sections) before opening the PR. A `## Memory promotion details` appendix with raw evidence is always appended for verifiability.
-- **`needs_human_decision` candidates are never auto-applied** — they stay in the digest for a human to review with `promote review` later.
+- **The promote branch is always cut from the base branch.** Even if you ran the command from a feature branch, the resulting branch's only diff is the memory updates — no unrelated changes leak in. PR target is always your local `origin`, never the scanned repo.
+- **Atomic — rollback on failure.** Files are written on the cut branch and the DB only flips to `promoted` after `gh pr create` succeeds. If anything between branch cut and PR open fails, the working tree, the promote branch, and the DB are all restored to their pre-run state. Re-running the next scan picks up where it left off.
+- **You're returned to your original branch on success.** The memory changes live on the promote branch and the PR; your working tree goes back to wherever you were.
+- **`needs_human_decision` candidates are never auto-applied** — they're surfaced in the headless run's output (`N candidate(s) flagged needs_human_decision — review locally with 'promote review'.`) and stay in the digest for human review.
+- **Target file paths come from `.promote.yml`, not the LLM.** The classifier's `suggestedFile` is only accepted if it matches a known instruction file (`AGENTS.md`, `CLAUDE.md`, …) or sits under `memoryTargets.pathScoped.preferredDir`. Anything else (e.g. source paths leaked from the scanned repo in `--allow-foreign-scan` mode) falls back to the configured destination.
 
 A ready-to-copy weekly workflow lives at [`examples/github-actions/weekly-digest.yml`](examples/github-actions/weekly-digest.yml). See [`examples/github-actions/README.md`](examples/github-actions/README.md) for the secrets and permissions it expects.
 
