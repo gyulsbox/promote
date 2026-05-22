@@ -7,6 +7,7 @@ import type {
   AnalysisStats,
   Cluster,
   AnalyzeReviewMemoryOutput,
+  HumanReactionSignal,
 } from "./types.js";
 import type { ResolvedModels } from "../llm/provider.js";
 import type { CostTracker } from "../llm/cost-tracker.js";
@@ -18,6 +19,7 @@ import { preCluster } from "../cluster/pre-cluster.js";
 import { scanExistingMemory } from "../memory/memory-scanner.js";
 import { classifyCluster } from "../classify/route-classifier.js";
 import { generateDraft } from "../draft/draft-generator.js";
+import { buildReplyContextMap, type BotCommentContext } from "../ingest/reply-context.js";
 
 export type EngineCallbacks = {
   onProgress?: (step: string, detail?: string) => void;
@@ -42,12 +44,21 @@ export async function analyzeReviewMemory(input: {
 
   // 2. Filter
   onProgress("filter", "Filtering...");
-  const { ai } = filterAIReviewComments(allComments, config.aiReviewers);
+  const { ai, human } = filterAIReviewComments(allComments, config.aiReviewers);
   const { kept } = filterNoise(ai);
 
   // 3. Normalize
   onProgress("normalize", "Normalizing...");
   const normalized = normalizeComments(kept);
+
+  // 3b. Build reply context map from human replies to bot comments
+  onProgress("filter", "Analyzing human reactions...");
+  let replyContextMap: Awaited<ReturnType<typeof buildReplyContextMap>>;
+  try {
+    replyContextMap = await buildReplyContextMap(ai, human, models.classificationModel, costTracker);
+  } catch {
+    replyContextMap = new Map();
+  }
 
   // 4. Pre-cluster
   onProgress("cluster", "Clustering...");
@@ -77,6 +88,9 @@ export async function analyzeReviewMemory(input: {
   for (const cluster of repeatedClusters) {
     onProgress("classify", `Classifying cluster ${candidateIndex}/${repeatedClusters.length}...`);
 
+    // Aggregate human reply/reaction signal for this cluster
+    cluster.humanSignal = aggregateHumanSignal(cluster, replyContextMap);
+
     try {
       const decision = await classifyCluster({
         cluster,
@@ -84,6 +98,8 @@ export async function analyzeReviewMemory(input: {
         memoryContext,
         costTracker,
         redact: config.privacy.redactSecrets,
+        humanSignal: cluster.humanSignal,
+        includeDiffHunks: config.privacy.sendDiffHunksToLLM,
       });
 
       // Skip low confidence or non-promotable
@@ -126,6 +142,7 @@ export async function analyzeReviewMemory(input: {
           createdAt: m.createdAt,
         })),
         status: decision.needsHumanDecision ? "needs_human_decision" : "candidate",
+        humanSignal: cluster.humanSignal,
       });
 
       candidateIndex++;
@@ -154,4 +171,31 @@ export async function analyzeReviewMemory(input: {
   };
 
   return { candidates, stats };
+}
+
+function aggregateHumanSignal(
+  cluster: Cluster,
+  replyContextMap: Map<string, BotCommentContext>,
+): HumanReactionSignal {
+  let agree = 0;
+  let reject = 0;
+  let plusOne = 0;
+  let minusOne = 0;
+  let topRejectExcerpt: string | undefined;
+
+  for (const m of cluster.members) {
+    const ctx = replyContextMap.get(m.id);
+    if (!ctx) continue;
+    for (const r of ctx.replies) {
+      if (r.sentiment === "agree") agree++;
+      if (r.sentiment === "reject") {
+        reject++;
+        if (!topRejectExcerpt) topRejectExcerpt = r.body.slice(0, 120);
+      }
+    }
+    plusOne += ctx.reactions.plusOne;
+    minusOne += ctx.reactions.minusOne;
+  }
+
+  return { agreementCount: agree, rejectionCount: reject, plusOneCount: plusOne, minusOneCount: minusOne, topRejectExcerpt };
 }

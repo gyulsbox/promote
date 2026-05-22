@@ -102,6 +102,7 @@ export function initDatabase(dbPath?: string): { db: ReturnType<typeof drizzle>;
   const migrations = [
     "ALTER TABLE clusters ADD COLUMN medoid_embedding BLOB",
     "ALTER TABLE candidates ADD COLUMN cluster_fingerprint TEXT",
+    "ALTER TABLE candidates ADD COLUMN human_signal_json TEXT",
   ];
   for (const migration of migrations) {
     try { sqlite.exec(migration); } catch { /* column already exists */ }

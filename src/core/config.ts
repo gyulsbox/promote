@@ -10,9 +10,8 @@ const promoteConfigSchema = z.object({
   language: z
     .object({
       preferredOutput: z.enum(["en", "ja", "ko"]).default("en"),
-      fallback: z.enum(["en", "ja", "ko"]).default("en"),
     })
-    .default({ preferredOutput: "en", fallback: "en" }),
+    .default({ preferredOutput: "en" }),
 
   aiReviewers: z
     .array(z.string())
@@ -103,7 +102,6 @@ export const DEFAULT_CONFIG_CONTENT = `version: 1
 
 # language:
 #   preferredOutput: en
-#   fallback: en
 
 # aiReviewers:
 #   - github-copilot[bot]

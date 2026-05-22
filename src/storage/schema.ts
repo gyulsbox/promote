@@ -71,6 +71,7 @@ export const candidates = sqliteTable("candidates", {
   status: text("status").notNull().default("candidate"),
   snoozedUntil: text("snoozed_until"),
   ignoreReason: text("ignore_reason"),
+  humanSignalJson: text("human_signal_json"),
   createdAt: text("created_at")
     .notNull()
     .$defaultFn(() => new Date().toISOString()),

@@ -288,7 +288,7 @@ export async function runInit() {
       `  promote scan --repo owner/repo --since 90d`,
       ``,
       `${chalk.bold("After scan:")}`,
-      `  promote promote candidate_001 --target agents --write`,
+      `  promote candidate_001           # apply with confirm prompt`,
       `  promote --help                # all commands`,
     ].join("\n"),
     "Next steps",
@@ -403,7 +403,6 @@ function generateConfig(opts: {
 
 language:
   preferredOutput: ${opts.language}
-  fallback: en
 
 memoryTargets:
   agents:
@@ -436,6 +435,10 @@ llm:
   classificationModel: ${models.classification}
   draftingModel: ${models.drafting}
   embeddingModel: ${models.embedding}
+
+privacy:
+  redactSecrets: true
+  sendDiffHunksToLLM: false
 `;
 }
 

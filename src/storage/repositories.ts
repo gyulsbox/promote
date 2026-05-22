@@ -97,6 +97,7 @@ export function upsertCandidateRecord(
     pathScope?: string | null;
     draftContent?: string | null;
     alternativesJson?: string | null;
+    humanSignalJson?: string | null;
     status: string;
   },
 ) {
@@ -114,6 +115,7 @@ export function upsertCandidateRecord(
         suggestedFile: record.suggestedFile,
         draftContent: record.draftContent,
         alternativesJson: record.alternativesJson,
+        humanSignalJson: record.humanSignalJson,
         updatedAt: new Date().toISOString(),
       },
     })

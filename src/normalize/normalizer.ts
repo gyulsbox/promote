@@ -41,6 +41,7 @@ export function normalizeComment(comment: RawReviewComment): NormalizedComment {
     htmlUrl: comment.htmlUrl,
     createdAt: comment.createdAt,
     filePath: comment.path,
+    diffHunk: comment.diffHunk,
   };
 }
 

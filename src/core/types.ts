@@ -4,6 +4,14 @@ export type RepoRef = {
   fullName: string; // "owner/repo"
 };
 
+export type HumanReactionSignal = {
+  agreementCount: number;
+  rejectionCount: number;
+  plusOneCount: number;
+  minusOneCount: number;
+  topRejectExcerpt?: string;
+};
+
 export type RawReviewComment = {
   id: string;
   repo: string;
@@ -17,6 +25,8 @@ export type RawReviewComment = {
   htmlUrl: string;
   createdAt: string;
   updatedAt?: string;
+  inReplyToId?: string;
+  reactions?: { plusOne: number; minusOne: number };
 };
 
 export type SeverityLevel = "blocker" | "important" | "suggestion" | "nit" | "unknown";
@@ -40,6 +50,9 @@ export type NormalizedComment = {
   htmlUrl: string;
   createdAt: string;
   filePath?: string;
+  diffHunk?: string;
+  inReplyToId?: string;
+  reactionCounts?: { plusOne: number; minusOne: number };
 };
 
 export type Cluster = {
@@ -49,6 +62,7 @@ export type Cluster = {
   members: NormalizedComment[];
   memberEmbeddings: number[][];
   fingerprint: string;
+  humanSignal?: HumanReactionSignal;
 };
 
 export type RoutingTarget =
@@ -108,6 +122,7 @@ export type PromotionCandidate = {
     createdAt: string;
   }>;
   status: "candidate" | "promoted" | "ignored" | "snoozed" | "needs_human_decision";
+  humanSignal?: HumanReactionSignal;
 };
 
 export type CandidateStatus = PromotionCandidate["status"];
@@ -174,7 +189,6 @@ export type LLMConfig = {
 
 export type LanguageConfig = {
   preferredOutput: "en" | "ja" | "ko";
-  fallback: "en" | "ja" | "ko";
 };
 
 export type PrivacyConfig = {

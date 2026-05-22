@@ -20,11 +20,13 @@ import { initDatabase } from "../../storage/db.js";
 import {
   upsertComments,
   resetExpiredSnoozes,
-  getCandidateByClusterFingerprint,
   upsertCandidateRecord,
+  listCandidates,
   saveCluster,
+  updateCandidateStatus,
 } from "../../storage/repositories.js";
-import type { PromotionCandidate, AnalysisStats } from "../../core/types.js";
+import { buildReplyContextMap } from "../../ingest/reply-context.js";
+import type { PromotionCandidate, AnalysisStats, HumanReactionSignal, Cluster } from "../../core/types.js";
 import * as out from "../output.js";
 import { mascotSays, mascotHappy } from "../mascot.js";
 import { createTimedSpinner, getClassifyMessage, getDraftMessage, getClusterMessage } from "../thinking.js";
@@ -146,7 +148,15 @@ export async function runScan(options: ScanOptions) {
 
   out.divider();
 
-  // 6. Scan existing memory
+  // 6. Build reply context map (human replies + reactions on bot comments)
+  let replyContextMap: Awaited<ReturnType<typeof buildReplyContextMap>>;
+  try {
+    replyContextMap = await buildReplyContextMap(ai, human, models.classificationModel, costTracker);
+  } catch {
+    replyContextMap = new Map();
+  }
+
+  // 7. Scan existing memory
   const memSpinner = out.spinner("Scanning existing memory files...");
   const memoryContext = await scanExistingMemory(octokit, repo, config.memoryTargets);
   memSpinner.succeed(
@@ -155,7 +165,32 @@ export async function runScan(options: ScanOptions) {
       : "No existing memory files found",
   );
 
-  // 7. Classify + Draft (parallel with ordered output)
+  // 8. Pre-assign stable candidate IDs from SQLite
+  // Same cluster fingerprint → same ID across scans. New clusters get max+1.
+  const allExisting = listCandidates(db, repo.fullName);
+  const fingerprintToRecord = new Map(
+    allExisting
+      .filter((r) => r.clusterFingerprint)
+      .map((r) => [r.clusterFingerprint!, r]),
+  );
+  let maxNum = 0;
+  for (const r of allExisting) {
+    const m = r.id.match(/candidate_(\d+)/);
+    if (m) maxNum = Math.max(maxNum, parseInt(m[1]));
+  }
+  let nextNewNum = maxNum + 1;
+
+  const preAssignedIds = new Map<string, string>(); // fingerprint → candidate ID
+  for (const cluster of repeatedClusters) {
+    const existing = fingerprintToRecord.get(cluster.fingerprint);
+    if (existing?.status === "promoted" || existing?.status === "ignored") continue;
+    preAssignedIds.set(
+      cluster.fingerprint,
+      existing?.id ?? `candidate_${String(nextNewNum++).padStart(3, "0")}`,
+    );
+  }
+
+  // 9. Classify + Draft (parallel with ordered output)
   const CONCURRENCY = 3;
   const total = repeatedClusters.length;
   const candidates: PromotionCandidate[] = [];
@@ -169,12 +204,9 @@ export async function runScan(options: ScanOptions) {
     confidence?: number;
   };
 
-  // Buffer for ordered output: results[i] is set when task i completes
   const resultBuffer: (ClusterResult | undefined)[] = new Array(total);
   let nextToPrint = 0;
-  let candidateNum = 1;
 
-  // Spinner for the currently processing items
   const activeSpinner = out.spinner("");
   const activeTimer = createTimedSpinner(
     activeSpinner,
@@ -182,51 +214,40 @@ export async function runScan(options: ScanOptions) {
     chalk.dim(`[1/${total}]`),
   );
 
-  // Flush all consecutive completed results from the buffer
   const flushBuffer = () => {
     while (nextToPrint < total && resultBuffer[nextToPrint] !== undefined) {
       const r = resultBuffer[nextToPrint]!;
       const progress = chalk.dim(`[${r.index + 1}/${total}]`);
-
-      // Stop spinner temporarily to print
       activeSpinner.clear();
 
       const cols = process.stdout.columns || 80;
       const prefix = `  ${progress} `;
 
       if (r.skipped) {
-        const label = `skip — `;
-        const maxSummary = cols - prefix.length - label.length - 1;
-        const summary = truncate(r.summary, maxSummary);
-        console.log(`${prefix}${chalk.dim("skip")} — ${chalk.dim(summary)}`);
+        const maxSummary = cols - prefix.length - 8;
+        console.log(`${prefix}${chalk.dim("skip")} — ${chalk.dim(truncate(r.summary, maxSummary))}`);
       } else if (r.candidate) {
-        r.candidate.id = `candidate_${String(candidateNum).padStart(3, "0")}`;
         candidates.push(r.candidate);
         const badge = `[${r.target}] `;
         const suffix = ` (${r.confidence?.toFixed(2)})`;
         const maxSummary = cols - prefix.length - badge.length - suffix.length - 1;
-        const summary = truncate(r.summary, maxSummary);
-        console.log(`${prefix}${chalk.cyan(`[${r.target}]`)} ${summary} ${chalk.dim(`(${r.confidence?.toFixed(2)})`)}`);
-        candidateNum++;
+        console.log(`${prefix}${chalk.cyan(`[${r.target}]`)} ${truncate(r.summary, maxSummary)} ${chalk.dim(`(${r.confidence?.toFixed(2)})`)}`);
       }
 
       nextToPrint++;
     }
-
-    // Resume spinner if there's still work
-    if (nextToPrint < total) {
-      activeSpinner.start();
-    }
+    if (nextToPrint < total) activeSpinner.start();
   };
 
   const processCluster = async (cluster: typeof repeatedClusters[0], index: number): Promise<void> => {
-    // Skip clusters already promoted or ignored in a previous scan
-    const existing = getCandidateByClusterFingerprint(db, repo.fullName, cluster.fingerprint);
-    if (existing && (existing.status === "promoted" || existing.status === "ignored")) {
+    const existing = fingerprintToRecord.get(cluster.fingerprint);
+    if (existing?.status === "promoted" || existing?.status === "ignored") {
       resultBuffer[index] = { index, candidate: null, summary: existing.summary, skipped: true };
       flushBuffer();
       return;
     }
+
+    const humanSignal = aggregateHumanSignal(cluster, replyContextMap);
 
     const decision = await classifyCluster({
       cluster,
@@ -235,6 +256,8 @@ export async function runScan(options: ScanOptions) {
       costTracker,
       outputLanguage: config.language.preferredOutput,
       redact: config.privacy.redactSecrets,
+      humanSignal,
+      includeDiffHunks: config.privacy.sendDiffHunksToLLM,
     });
 
     if (!decision.clusterValid || decision.target === "none" || decision.target === "pr_only") {
@@ -258,10 +281,12 @@ export async function runScan(options: ScanOptions) {
       redact: config.privacy.redactSecrets,
     });
 
+    const candidateId = preAssignedIds.get(cluster.fingerprint) ?? `candidate_${String(nextNewNum++).padStart(3, "0")}`;
+
     resultBuffer[index] = {
       index,
       candidate: {
-        id: "",
+        id: candidateId,
         repo: repo.fullName,
         clusterId: cluster.id,
         clusterFingerprint: cluster.fingerprint,
@@ -282,6 +307,7 @@ export async function runScan(options: ScanOptions) {
           createdAt: m.createdAt,
         })),
         status: decision.needsHumanDecision ? "needs_human_decision" as const : "candidate" as const,
+        humanSignal,
       },
       summary: decision.summary,
       skipped: false,
@@ -355,6 +381,7 @@ export async function runScan(options: ScanOptions) {
       pathScope: c.pathScope,
       draftContent: c.draft.content,
       alternativesJson: JSON.stringify(c.alternatives),
+      humanSignalJson: c.humanSignal ? JSON.stringify(c.humanSignal) : null,
       status: c.status,
     });
   }
@@ -452,85 +479,22 @@ export async function runScan(options: ScanOptions) {
 
   if (p.isCancel(reviewNow) || reviewNow === "later") {
     out.info(`Digest: ${chalk.bold(digestPath)}`);
-    out.info(`Promote later: ${chalk.dim("promote promote candidate_001 --target agents --write")}`);
+    out.info(`Promote later: ${chalk.dim("promote candidate_001")}  ${chalk.dim("# or: promote review")}`);
     return;
   }
 
-  // Interactive review
-  const actions = await runInteractiveReview(candidates);
-
-  // Apply promotions
-  let promoted = 0;
-  let ignored = 0;
-  let skipped = 0;
-
-  for (const action of actions) {
-    const candidate = candidates.find((c) => c.id === action.candidateId);
-    if (!candidate) continue;
-
-    switch (action.action) {
-      case "promote":
-        await applyPromotion(candidate, candidate.target);
-        promoted++;
-        break;
-      case "change-target":
-        if (action.newTarget) {
-          await applyPromotion(candidate, action.newTarget);
-          promoted++;
-        }
-        break;
-      case "ignore":
-        ignored++;
-        break;
-      case "skip":
-        skipped++;
-        break;
-    }
-  }
+  // Interactive review — each approval writes immediately
+  const { promoted, skipped } = await runInteractiveReview(
+    candidates,
+    async (candidate, target) => {
+      await applyPromotion(candidate, target);
+      updateCandidateStatus(db, candidate.id, "promoted");
+    },
+  );
 
   out.divider();
 
-  if (promoted > 0) {
-    mascotHappy(`Done! ${promoted} candidate(s) promoted.`);
-    console.log();
-
-    // Show what was written where
-    const promotedCandidates = candidates.filter((c) =>
-      actions.some((a) => a.candidateId === c.id && (a.action === "promote" || a.action === "change-target")),
-    );
-
-    console.log(chalk.bold("  Files modified:"));
-    const fileGroups: Record<string, string[]> = {};
-    for (const c of promotedCandidates) {
-      const file = c.suggestedFile ?? c.target;
-      if (!fileGroups[file]) fileGroups[file] = [];
-      fileGroups[file].push(c.summary);
-    }
-    for (const [file, summaries] of Object.entries(fileGroups)) {
-      console.log(`    ${chalk.cyan(file)}`);
-      for (const s of summaries) {
-        console.log(chalk.dim(`      + ${s}`));
-      }
-    }
-    console.log();
-
-    // Preview first promoted file
-    const firstFile = Object.keys(fileGroups)[0];
-    if (firstFile) {
-      const fullPath = resolve(process.cwd(), firstFile);
-      if (existsSync(fullPath)) {
-        const content = readFileSync(fullPath, "utf-8");
-        const lines = content.split("\n").slice(-10);
-        console.log(chalk.dim(`  Preview (${firstFile}, last 10 lines):`));
-        for (const line of lines) {
-          console.log(chalk.dim(`    ${line}`));
-        }
-        console.log();
-      }
-    }
-  }
-
-  if (skipped > 0) out.info(`${skipped} candidate(s) skipped for later.`);
+  if (skipped > 0) out.info(`${skipped} candidate(s) skipped. Review later: ${chalk.dim("promote review")}`);
   out.info(`Full digest: ${chalk.bold(digestPath)}`);
 
   if (promoted > 0) {
@@ -541,6 +505,7 @@ export async function runScan(options: ScanOptions) {
       console.log(chalk.dim.italic(`  ${line}`));
     }
     console.log();
+    mascotHappy(`Done! ${promoted} candidate(s) promoted.`);
     out.info("Review the modified files, then commit when ready.");
   }
 }
@@ -590,6 +555,28 @@ function parseSinceDays(since: string): number {
   if (!Number.isNaN(num) && num > 0) return num;
 
   throw new Error(`Invalid --since value: "${since}". Use format like "60d" or "60".`);
+}
+
+function aggregateHumanSignal(
+  cluster: Cluster,
+  replyContextMap: Awaited<ReturnType<typeof buildReplyContextMap>>,
+): HumanReactionSignal {
+  let agree = 0, reject = 0, plusOne = 0, minusOne = 0;
+  let topRejectExcerpt: string | undefined;
+  for (const m of cluster.members) {
+    const ctx = replyContextMap.get(m.id);
+    if (!ctx) continue;
+    for (const r of ctx.replies) {
+      if (r.sentiment === "agree") agree++;
+      if (r.sentiment === "reject") {
+        reject++;
+        if (!topRejectExcerpt) topRejectExcerpt = r.body.slice(0, 120);
+      }
+    }
+    plusOne += ctx.reactions.plusOne;
+    minusOne += ctx.reactions.minusOne;
+  }
+  return { agreementCount: agree, rejectionCount: reject, plusOneCount: plusOne, minusOneCount: minusOne, topRejectExcerpt };
 }
 
 function truncate(text: string, max: number): string {

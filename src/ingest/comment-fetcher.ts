@@ -36,6 +36,10 @@ export async function fetchReviewComments(
         htmlUrl: c.html_url,
         createdAt: c.created_at,
         updatedAt: c.updated_at,
+        inReplyToId: c.in_reply_to_id ? String(c.in_reply_to_id) : undefined,
+        reactions: c.reactions
+          ? { plusOne: c.reactions["+1"] ?? 0, minusOne: c.reactions["-1"] ?? 0 }
+          : undefined,
       });
     }
 

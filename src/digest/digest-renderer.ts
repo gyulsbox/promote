@@ -5,6 +5,7 @@ const TRANSLATIONS: Record<string, {
   generated: string;
   summary: string;
   evidence: string;
+  humanSignal: string;
   suggestedPatch: string;
   whyTarget: string;
   alternatives: string;
@@ -16,6 +17,7 @@ const TRANSLATIONS: Record<string, {
     generated: "Generated on",
     summary: "Summary",
     evidence: "Evidence",
+    humanSignal: "Human signal",
     suggestedPatch: "Suggested patch",
     whyTarget: "Why this target",
     alternatives: "Alternatives considered",
@@ -27,6 +29,7 @@ const TRANSLATIONS: Record<string, {
     generated: "생성일:",
     summary: "요약",
     evidence: "근거",
+    humanSignal: "사람 반응",
     suggestedPatch: "제안된 패치",
     whyTarget: "이 대상을 선택한 이유",
     alternatives: "고려된 대안",
@@ -38,6 +41,7 @@ const TRANSLATIONS: Record<string, {
     generated: "生成日:",
     summary: "概要",
     evidence: "根拠",
+    humanSignal: "ヒューマンシグナル",
     suggestedPatch: "提案パッチ",
     whyTarget: "このターゲットを選んだ理由",
     alternatives: "検討された代替案",
@@ -104,6 +108,22 @@ export function renderDigest(
     }
     lines.push("");
 
+    // Human signal
+    if (c.humanSignal) {
+      const s = c.humanSignal;
+      const hasSignal = s.agreementCount + s.rejectionCount + s.plusOneCount + s.minusOneCount > 0;
+      if (hasSignal) {
+        lines.push(`### ${t.humanSignal}`);
+        lines.push("");
+        if (s.agreementCount > 0) lines.push(`- Agreed: **${s.agreementCount}** reviewer(s)`);
+        if (s.rejectionCount > 0) lines.push(`- Dismissed: **${s.rejectionCount}** reviewer(s) (e.g. "by design", "special case")`);
+        if (s.plusOneCount > 0) lines.push(`- 👍 ${s.plusOneCount}`);
+        if (s.minusOneCount > 0) lines.push(`- 👎 ${s.minusOneCount}`);
+        if (s.topRejectExcerpt) lines.push(`- Dismissal context: *"${s.topRejectExcerpt}"*`);
+        lines.push("");
+      }
+    }
+
     // Draft
     lines.push(`### ${t.suggestedPatch}`);
     lines.push("");
@@ -132,7 +152,7 @@ export function renderDigest(
     lines.push(`### ${t.actions}`);
     lines.push("");
     lines.push("```bash");
-    lines.push(`promote promote ${c.id} --target ${c.target} --write`);
+    lines.push(`promote ${c.id} --target ${c.target}`);
     lines.push(`promote ignore ${c.id} --reason "..."`);
     lines.push(`promote snooze ${c.id} --days 30`);
     lines.push("```");
