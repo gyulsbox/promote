@@ -1,13 +1,20 @@
 name: Release
 
-# Trigger: every push to main. release-please opens / updates a Release PR
-# that bumps version and appends to CHANGELOG.md based on conventional commits
-# since the last release. When that PR is merged, release-please creates a
-# GitHub release + tag, which fans out to the publish job below.
+# Manual-only. Trigger from the Actions tab → "Release" → "Run workflow".
+#
+# Typical flow:
+#   1. Merge feature PRs to main as usual.
+#   2. When ready to cut a release, dispatch this workflow.
+#      release-please reads conventional commits since the last release and
+#      opens / updates a "Release PR" that bumps version + CHANGELOG.
+#   3. Review and merge the Release PR.
+#   4. Dispatch this workflow again. release-please now sees the merge,
+#      creates a tag + GitHub release, and the publish-npm job below fires.
+#
+# (Two dispatches are by design: one to prepare the release, one to publish.)
 
 on:
-  push:
-    branches: [main]
+  workflow_dispatch:
 
 permissions:
   contents: write
