@@ -1,0 +1,59 @@
+name: Weekly memory promotion digest
+
+# Runs `promote-cli` once a week, applies high-confidence candidates,
+# and opens a single bundled PR. Also runnable on demand from the Actions tab.
+
+on:
+  schedule:
+    - cron: "0 9 * * 1"   # every Monday 09:00 UTC
+  workflow_dispatch: {}
+
+permissions:
+  contents: write         # push the branch
+  pull-requests: write    # open the PR
+
+jobs:
+  scan-and-pr:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      # Persist .promote/ across runs so candidate IDs and cross-run dedup
+      # remain stable week over week. Single key keyed only by repo — the
+      # cache action's behaviour is "restore if matched, save on success" with
+      # a single key, which is what we want for monotonically-evolving state.
+      # (run_id in the key would make every cache entry unique and break
+      # restore — never re-cache-hit.)
+      - name: Restore promote state
+        uses: actions/cache@v4
+        with:
+          path: .promote
+          key: promote-${{ github.repository }}
+
+      - name: Configure git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Run promote scan + create PR
+        env:
+          # Used by gh CLI and the octokit fallback.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Pick whichever provider your repo is configured for in .promote.yml.
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
+        run: |
+          npx -y promote-cli@latest scan \
+            --no-interactive \
+            --min-confidence 0.85 \
+            --create-pr
