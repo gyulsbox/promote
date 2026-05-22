@@ -5,7 +5,7 @@ const CLUSTER_MESSAGES = [
   "Finding patterns in the noise...",
   "Comparing review comments...",
   "Matching repeated signals...",
-  "Sorting through 60 days of reviews...",
+  "Sorting through the review history...",
   "Measuring similarity...",
   "Building comment clusters...",
   "Connecting scattered feedback...",

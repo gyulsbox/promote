@@ -2,9 +2,12 @@
  * Extract structured features from review comment text:
  * - Identifiers (function names, variable names, class names)
  * - File paths
- * - Action verbs (use, avoid, prefer, etc.)
+ * - Action verbs (use, avoid, prefer, etc.) — including Ko/Ja
+ * - Severity markers (P0-P3, nit, must, GitHub Alert syntax)
  * - Language detection
  */
+
+import type { SeverityLevel, SeverityMarker } from "../core/types.js";
 
 // Common action verbs found in code review comments
 const ACTION_VERBS = new Set([
@@ -13,6 +16,73 @@ const ACTION_VERBS = new Set([
   "always", "instead", "import", "export", "wrap", "call", "return",
   "throw", "handle", "check", "validate", "convert", "refactor",
 ]);
+
+const KO_ACTION_VERBS = new Set([
+  "사용", "피하", "대신", "변경", "제거", "추가", "확인", "검토",
+  "수정", "개선", "반드시", "꼭", "권장", "고려", "필요", "지양",
+]);
+
+const JA_ACTION_VERBS = new Set([
+  "使用", "避け", "代わり", "変更", "削除", "追加", "確認", "修正",
+  "改善", "必ず", "ください", "べき", "推奨", "検討", "必要", "禁止",
+]);
+
+// Severity extraction — language-agnostic (bots use English prefixes regardless of comment language)
+const P_NUMBER_RE = /^(?:\*{0,2})[Pp]([0-3])(?:\*{0,2})[:：\s-]/m;
+const SEVERITY_WORD_RE =
+  /^(?:\*{0,2})(critical|blocker|blocking|important|must|should|suggestion|consider|nit(?:pick)?|minor|could)(?:\*{0,2})[:：\s-]/im;
+const GH_ALERT_RE = /\[!(WARNING|CAUTION|IMPORTANT|TIP|NOTE)\]/i;
+
+const P_MAP: Record<string, SeverityLevel> = {
+  "0": "blocker",
+  "1": "important",
+  "2": "suggestion",
+  "3": "nit",
+};
+
+const WORD_MAP: Record<string, SeverityLevel> = {
+  critical: "blocker",
+  blocker: "blocker",
+  blocking: "blocker",
+  important: "important",
+  must: "important",
+  should: "suggestion",
+  suggestion: "suggestion",
+  consider: "suggestion",
+  nit: "nit",
+  nitpick: "nit",
+  minor: "nit",
+  could: "nit",
+};
+
+const ALERT_MAP: Record<string, SeverityLevel> = {
+  WARNING: "important",
+  CAUTION: "important",
+  IMPORTANT: "suggestion",
+  TIP: "nit",
+  NOTE: "nit",
+};
+
+export function extractSeverityMarker(text: string): SeverityMarker {
+  const pMatch = text.match(P_NUMBER_RE);
+  if (pMatch) {
+    return { raw: `P${pMatch[1]}`, level: P_MAP[pMatch[1]] ?? "unknown" };
+  }
+
+  const wordMatch = text.match(SEVERITY_WORD_RE);
+  if (wordMatch) {
+    const key = wordMatch[1].toLowerCase();
+    return { raw: wordMatch[1], level: WORD_MAP[key] ?? "unknown" };
+  }
+
+  const alertMatch = text.match(GH_ALERT_RE);
+  if (alertMatch) {
+    const key = alertMatch[1].toUpperCase();
+    return { raw: alertMatch[0], level: ALERT_MAP[key] ?? "unknown" };
+  }
+
+  return { raw: null, level: "unknown" };
+}
 
 // Regex for backtick-wrapped identifiers
 const BACKTICK_RE = /`([^`]+)`/g;
@@ -92,14 +162,28 @@ export function extractPaths(text: string, commentPath?: string): string[] {
   return [...paths];
 }
 
-export function extractActionVerbs(text: string): string[] {
-  const words = text.toLowerCase().split(/\s+/);
+export function extractActionVerbs(
+  text: string,
+  language?: "en" | "ja" | "ko" | "mixed" | "unknown",
+): string[] {
   const found = new Set<string>();
 
+  const words = text.toLowerCase().split(/\s+/);
   for (const word of words) {
     const cleaned = word.replace(/[^a-z]/g, "");
     if (ACTION_VERBS.has(cleaned)) {
       found.add(cleaned);
+    }
+  }
+
+  if (language === "ko" || language === "mixed") {
+    for (const v of KO_ACTION_VERBS) {
+      if (text.includes(v)) found.add(v);
+    }
+  }
+  if (language === "ja" || language === "mixed") {
+    for (const v of JA_ACTION_VERBS) {
+      if (text.includes(v)) found.add(v);
     }
   }
 

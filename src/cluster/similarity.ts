@@ -10,15 +10,19 @@ export function computeSimilarity(
   embeddingA: number[],
   embeddingB: number[],
 ): number {
-  const semantic = cosineSimilarity(embeddingA, embeddingB);
-  const identifierOverlap = jaccardSimilarity(a.identifiers, b.identifiers);
-  const pathOverlap = pathSimilarity(a.paths, b.paths);
+  const features: Array<{ w: number; sim: number }> = [];
+  features.push({ w: WEIGHT_SEMANTIC, sim: cosineSimilarity(embeddingA, embeddingB) });
 
-  return (
-    WEIGHT_SEMANTIC * semantic +
-    WEIGHT_IDENTIFIER * identifierOverlap +
-    WEIGHT_PATH * pathOverlap
-  );
+  if (a.identifiers.length > 0 && b.identifiers.length > 0) {
+    features.push({ w: WEIGHT_IDENTIFIER, sim: jaccardSimilarity(a.identifiers, b.identifiers) });
+  }
+
+  if (a.paths.length > 0 && b.paths.length > 0) {
+    features.push({ w: WEIGHT_PATH, sim: pathSimilarity(a.paths, b.paths) });
+  }
+
+  const totalW = features.reduce((s, f) => s + f.w, 0);
+  return features.reduce((s, f) => s + f.w * f.sim, 0) / totalW;
 }
 
 export function cosineSimilarity(a: number[], b: number[]): number {
@@ -39,7 +43,7 @@ export function cosineSimilarity(a: number[], b: number[]): number {
 }
 
 export function jaccardSimilarity(a: string[], b: string[]): number {
-  if (a.length === 0 && b.length === 0) return 0;
+  if (a.length === 0 && b.length === 0) return 1.0;
 
   const setA = new Set(a.map((s) => s.toLowerCase()));
   const setB = new Set(b.map((s) => s.toLowerCase()));

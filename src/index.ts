@@ -1,110 +1,124 @@
 import { Command } from "commander";
 import { runInit } from "./cli/commands/init.js";
 import { runScan } from "./cli/commands/scan.js";
-import { runPromote } from "./cli/commands/promote.js";
+import { runPromote, runReview } from "./cli/commands/promote.js";
 import { initDatabase } from "./storage/db.js";
 import { updateCandidateStatus } from "./storage/repositories.js";
 import * as out from "./cli/output.js";
+import { VERSION } from "./version.js";
 
-// Graceful shutdown
+// SIGINT: write to stderr (bypasses stdout buffering held by ora/clack spinners),
+// restore cursor (ora hides it by default), exit with conventional 130.
+// Second Ctrl+C inside the same process forces an immediate kill in case the first
+// exit gets stuck waiting on in-flight HTTP sockets to flush.
+let sigintCount = 0;
 process.on("SIGINT", () => {
-  console.log();
-  out.info("Interrupted. Bye!");
-  process.exit(0);
+  sigintCount++;
+  if (sigintCount === 1) {
+    process.stderr.write("\n\x1b[?25h\x1b[31m✗\x1b[0m Interrupted.\n");
+    process.exit(130);
+  } else {
+    process.kill(process.pid, "SIGKILL");
+  }
 });
 
 const program = new Command();
 
 program
   .name("promote")
-  .description("Promote repeated AI review comments into durable repository memory")
-  .version("0.1.0");
+  .description("Turn repeated AI review comments into durable repository memory")
+  .version(VERSION);
 
 program
   .command("init")
-  .description("Initialize promote config and storage")
+  .description("Interactive setup — LLM provider, AI tool, memory file locations")
   .action(async () => {
     try {
       await runInit();
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      console.error(`Error: ${msg}`);
+      out.error(err instanceof Error ? err.message : String(err));
       process.exit(1);
     }
   });
 
 program
   .command("scan")
-  .description("Scan repository for repeated AI review patterns")
+  .description("Scan for repeated AI review patterns and review candidates")
   .option("--repo <owner/repo>", "GitHub repository (default: current git remote)")
-  .option("--since <days>", "Time window (default: config windowDays or 60d)")
-  .option("--out <path>", "Output digest file path")
-  .option("--config <path>", "Path to config file")
-  .option("--verbose", "Enable verbose output")
+  .option("--since <days>", "Time window, e.g. 60d (default: config windowDays)")
+  .option("--out <path>", "Digest output file path")
+  .option("--config <path>", "Path to .promote.yml")
+  .option(
+    "--mode <mode>",
+    "Clustering mode: 'quick' (embedding+HAC, cheap, narrow patterns — requires a provider with embedding API: OpenAI or Google) or 'broad' (LLM-direct, convention-level patterns, more costly — works on any provider). Overrides llm.clusteringStrategy in config.",
+  )
+  .option("--verbose", "Verbose output")
   .action(async (options) => {
     try {
       await runScan(options);
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      console.error(`Error: ${msg}`);
+      out.error(err instanceof Error ? err.message : String(err));
+      process.exit(1);
+    }
+  });
+
+program
+  .command("review")
+  .description("Review pending candidates one by one (after deferring from scan)")
+  .option("--config <path>", "Path to .promote.yml")
+  .action(async (options) => {
+    try {
+      await runReview(options);
+    } catch (err) {
+      out.error(err instanceof Error ? err.message : String(err));
       process.exit(1);
     }
   });
 
 program
   .command("promote <candidateId>")
-  .description("Promote a candidate into repository memory")
+  .description("Apply a specific candidate — shows details, asks for confirmation")
   .option("--target <target>", "Override routing target (agents, path_scoped_rule, adr, test)")
   .option("--file <path>", "Override target file path")
-  .option("--write", "Actually write the file (default is dry-run)")
-  .option("--dry-run", "Preview changes without writing")
-  .option("--config <path>", "Path to config file")
+  .option("--config <path>", "Path to .promote.yml")
   .action(async (candidateId, options) => {
     try {
       await runPromote(candidateId, options);
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      console.error(`Error: ${msg}`);
+      out.error(err instanceof Error ? err.message : String(err));
       process.exit(1);
     }
   });
 
 program
   .command("ignore <candidateId>")
-  .description("Ignore a candidate permanently")
+  .description("Permanently ignore a candidate")
   .option("--reason <reason>", "Why this is being ignored")
   .action((candidateId, options) => {
     try {
       const { db } = initDatabase();
-      updateCandidateStatus(db, candidateId, "ignored", {
-        ignoreReason: options.reason,
-      });
+      updateCandidateStatus(db, candidateId, "ignored", { ignoreReason: options.reason });
       out.success(`Ignored ${candidateId}.`);
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      console.error(`Error: ${msg}`);
+      out.error(err instanceof Error ? err.message : String(err));
       process.exit(1);
     }
   });
 
 program
   .command("snooze <candidateId>")
-  .description("Snooze a candidate for a period")
-  .option("--days <days>", "Number of days to snooze", "30")
+  .description("Snooze a candidate — resurfaces automatically after the period")
+  .option("--days <days>", "Days to snooze", "30")
   .action((candidateId, options) => {
     try {
       const days = Number(options.days);
       const until = new Date();
       until.setDate(until.getDate() + days);
-
       const { db } = initDatabase();
-      updateCandidateStatus(db, candidateId, "snoozed", {
-        snoozedUntil: until.toISOString(),
-      });
+      updateCandidateStatus(db, candidateId, "snoozed", { snoozedUntil: until.toISOString() });
       out.success(`Snoozed ${candidateId} until ${until.toISOString().split("T")[0]}.`);
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      console.error(`Error: ${msg}`);
+      out.error(err instanceof Error ? err.message : String(err));
       process.exit(1);
     }
   });

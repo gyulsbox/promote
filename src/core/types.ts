@@ -4,6 +4,17 @@ export type RepoRef = {
   fullName: string; // "owner/repo"
 };
 
+export type HumanReactionSignal = {
+  agreementCount: number;
+  rejectionCount: number;
+  plusOneCount: number;
+  minusOneCount: number;
+  firstRejectExcerpt?: string;
+  firstAgreementExcerpt?: string;
+  agreementAuthors?: string[];
+  rejectionAuthors?: string[];
+};
+
 export type RawReviewComment = {
   id: string;
   repo: string;
@@ -17,6 +28,15 @@ export type RawReviewComment = {
   htmlUrl: string;
   createdAt: string;
   updatedAt?: string;
+  inReplyToId?: string;
+  reactions?: { plusOne: number; minusOne: number };
+};
+
+export type SeverityLevel = "blocker" | "important" | "suggestion" | "nit" | "unknown";
+
+export type SeverityMarker = {
+  raw: string | null;
+  level: SeverityLevel;
 };
 
 export type NormalizedComment = {
@@ -26,12 +46,16 @@ export type NormalizedComment = {
   identifiers: string[];
   paths: string[];
   actionVerbs: string[];
+  severityMarker: SeverityMarker;
   language: "en" | "ja" | "ko" | "mixed" | "unknown";
   prNumber: number;
   authorLogin: string;
   htmlUrl: string;
   createdAt: string;
   filePath?: string;
+  diffHunk?: string;
+  inReplyToId?: string;
+  reactionCounts?: { plusOne: number; minusOne: number };
 };
 
 export type Cluster = {
@@ -41,6 +65,7 @@ export type Cluster = {
   members: NormalizedComment[];
   memberEmbeddings: number[][];
   fingerprint: string;
+  humanSignal?: HumanReactionSignal;
 };
 
 export type RoutingTarget =
@@ -79,6 +104,7 @@ export type PromotionCandidate = {
   id: string;
   repo: string;
   clusterId: string;
+  clusterFingerprint?: string;
   summary: string;
   target: RoutingTarget;
   confidence: number;
@@ -99,6 +125,7 @@ export type PromotionCandidate = {
     createdAt: string;
   }>;
   status: "candidate" | "promoted" | "ignored" | "snoozed" | "needs_human_decision";
+  humanSignal?: HumanReactionSignal;
 };
 
 export type CandidateStatus = PromotionCandidate["status"];
@@ -110,10 +137,21 @@ export type AnalysisStats = {
   clustersFound: number;
   repeatedClusters: number;
   candidatesGenerated: number;
+  failedClusters: number;
   prCount: number;
-  embeddingTokens: number;
-  classificationTokens: number;
+  promptTokens: number;
+  completionTokens: number;
   estimatedCostUSD: number;
+  timings?: {
+    fetchMs: number;
+    normalizeMs: number;
+    clusterMs: number;
+    conversationFetchMs: number;
+    replyContextMs: number;
+    memoryScanMs: number;
+    classifyDraftMs: number;
+    totalMs: number;
+  };
 };
 
 export type AnalyzeReviewMemoryInput = {
@@ -158,13 +196,23 @@ export type MemoryTargetsConfig = {
 export type LLMConfig = {
   provider: "openai" | "anthropic" | "google";
   classificationModel: string;
+  clusteringModel?: string;
+  /**
+   * "embedding" (default): use cheap embeddings + HAC for clustering, falling
+   *   back to LLM-direct only when the provider has no embedding API
+   *   (Anthropic).
+   * "llm-direct": force LLM-direct clustering even when embeddings are
+   *   available. Uses clusteringModel (or classificationModel if unset).
+   *   Trades cost for semantic-level grouping that produces broader
+   *   convention/principle candidates instead of narrow text-similarity ones.
+   */
+  clusteringStrategy?: "embedding" | "llm-direct";
   draftingModel: string;
   embeddingModel: string;
 };
 
 export type LanguageConfig = {
   preferredOutput: "en" | "ja" | "ko";
-  fallback: "en" | "ja" | "ko";
 };
 
 export type PrivacyConfig = {
@@ -173,7 +221,7 @@ export type PrivacyConfig = {
 };
 
 export type PromoteConfig = {
-  version: 1;
+  version: 2;
   language: LanguageConfig;
   aiReviewers: string[];
   memoryTargets: MemoryTargetsConfig;

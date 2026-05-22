@@ -24,8 +24,9 @@ const BOT_FOOTER_PATTERNS = [
   /\*\*Full Coverage Report\*\*/,
   /<details>[\s\S]*?<summary>.*walkthrough/i,
   /<!-- .* -->/,
-  /\[!TIP\]/,
+  /\[!(?:TIP|NOTE|IMPORTANT|WARNING|CAUTION)\]/,
   /This is an auto-generated/i,
+  /^_:[\w_]+:_\s*$/m,
 ];
 
 export type DiscardedComment = {

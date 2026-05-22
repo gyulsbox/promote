@@ -3,12 +3,6 @@ import chalk from "chalk";
 import type { PromotionCandidate } from "../../core/types.js";
 import { mascotSays } from "../mascot.js";
 
-export type ReviewAction = {
-  candidateId: string;
-  action: "promote" | "skip" | "ignore" | "change-target";
-  newTarget?: string;
-};
-
 const TARGET_LABELS: Record<string, string> = {
   agents: "AGENTS.md / CLAUDE.md (repo-wide instruction)",
   path_scoped_rule: "Path-scoped rule (.github/instructions/)",
@@ -16,63 +10,38 @@ const TARGET_LABELS: Record<string, string> = {
   test: "Test (runtime invariant)",
 };
 
+export type ReviewStats = {
+  promoted: number;
+  skipped: number;
+  ignored: number;
+};
+
+/**
+ * Review candidates one by one. Calls onPromote immediately when the user
+ * approves a candidate — no batch collection, no deferred apply.
+ */
 export async function runInteractiveReview(
   candidates: PromotionCandidate[],
-): Promise<ReviewAction[]> {
-  const actions: ReviewAction[] = [];
+  onPromote: (candidate: PromotionCandidate, target: string) => Promise<void>,
+): Promise<ReviewStats> {
+  const stats: ReviewStats = { promoted: 0, skipped: 0, ignored: 0 };
 
   console.log();
-  mascotSays(`${candidates.length} candidate(s) to review. Let's go through them.`);
+  mascotSays(`${candidates.length} candidate(s) to review.`);
   console.log();
 
   for (let i = 0; i < candidates.length; i++) {
     const c = candidates[i];
     const num = `${i + 1}/${candidates.length}`;
 
-    // Show candidate details
-    console.log();
-    console.log(chalk.bold.cyan(`  ─── Candidate ${num} ───`));
-    console.log();
-    console.log(`  ${chalk.bold(c.summary)}`);
-    console.log();
-    console.log(`  ${chalk.dim("Target")}      ${chalk.cyan(c.target)}${c.suggestedFile ? chalk.dim(` → ${c.suggestedFile}`) : ""}`);
-    console.log(`  ${chalk.dim("Confidence")}  ${c.confidence}`);
-    console.log(`  ${chalk.dim("Occurrences")} ${c.occurrences.length}`);
-    if (c.pathScope) {
-      console.log(`  ${chalk.dim("Path scope")}  ${c.pathScope}`);
-    }
-    console.log();
+    printCandidateDetails(c, num);
 
-    // Evidence
-    console.log(`  ${chalk.dim("Evidence:")}`);
-    for (const o of c.occurrences.slice(0, 3)) {
-      console.log(`    ${chalk.dim("PR #" + o.prNumber)} ${o.path ?? ""}`);
-    }
-    if (c.occurrences.length > 3) {
-      console.log(chalk.dim(`    +${c.occurrences.length - 3} more`));
-    }
-    console.log();
-
-    // Patch preview
-    console.log(`  ${chalk.dim("Patch:")}`);
-    const patchLines = c.draft.content.split("\n").slice(0, 8);
-    for (const line of patchLines) {
-      console.log(chalk.green(`    ${line}`));
-    }
-    if (c.draft.content.split("\n").length > 8) {
-      console.log(chalk.dim("    ..."));
-    }
-    console.log();
-
-    // Show full patch if truncated
     const patchTruncated = c.draft.content.split("\n").length > 8;
-
     let action: string | symbol;
 
-    // Loop to allow "show full" then come back to decision
     while (true) {
       action = await p.select({
-        message: `What do you want to do with this candidate?`,
+        message: "What do you want to do with this candidate?",
         options: [
           {
             value: "promote",
@@ -90,14 +59,14 @@ export async function runInteractiveReview(
           {
             value: "skip",
             label: "Skip",
-            hint: "move to next candidate",
+            hint: "decide later with: promote <id>",
           },
         ],
       });
 
       if (p.isCancel(action)) {
         mascotSays("Review cancelled. Remaining candidates saved in digest.");
-        return actions;
+        process.exit(130);
       }
 
       if (action === "show-full") {
@@ -108,40 +77,97 @@ export async function runInteractiveReview(
           console.log(chalk.green(`    ${line}`));
         }
         console.log();
-        continue; // back to action selection
+        continue;
       }
 
-      break; // got a real action
-    }
-
-    if (p.isCancel(action)) {
       break;
     }
 
     if (action === "change-target") {
       const newTarget = await p.select({
         message: "Which target?",
-        options: [
-          { value: "agents", label: "agents", hint: TARGET_LABELS.agents },
-          { value: "path_scoped_rule", label: "path_scoped_rule", hint: TARGET_LABELS.path_scoped_rule },
-          { value: "adr", label: "adr", hint: TARGET_LABELS.adr },
-          { value: "test", label: "test", hint: TARGET_LABELS.test },
-        ],
+        options: Object.entries(TARGET_LABELS).map(([value, hint]) => ({ value, label: value, hint })),
       });
 
       if (p.isCancel(newTarget)) {
-        actions.push({ candidateId: c.id, action: "skip" });
-      } else {
-        actions.push({
-          candidateId: c.id,
-          action: "change-target",
-          newTarget: newTarget as string,
-        });
+        stats.skipped++;
+        continue;
       }
+
+      await onPromote(c, newTarget as string);
+      stats.promoted++;
+    } else if (action === "promote") {
+      await onPromote(c, c.target);
+      stats.promoted++;
     } else {
-      actions.push({ candidateId: c.id, action: action as ReviewAction["action"] });
+      stats.skipped++;
     }
   }
 
-  return actions;
+  return stats;
 }
+
+function printCandidateDetails(c: PromotionCandidate, num: string) {
+  console.log();
+  console.log(chalk.bold.cyan(`  ─── Candidate ${num} ───`));
+  console.log();
+  console.log(`  ${chalk.bold(c.summary)}`);
+  console.log();
+  const uniquePrs = new Set(c.occurrences.map((o) => o.prNumber)).size;
+  const scope = uniquePrs >= 2 ? chalk.green(`cross-PR (${uniquePrs} PRs)`) : chalk.yellow(`within-PR (1 PR)`);
+  console.log(`  ${chalk.dim("ID")}          ${chalk.dim(c.id)}`);
+  console.log(`  ${chalk.dim("Target")}      ${chalk.cyan(c.target)}${c.suggestedFile ? chalk.dim(` → ${c.suggestedFile}`) : ""}`);
+  console.log(`  ${chalk.dim("Confidence")}  ${c.confidence}`);
+  console.log(`  ${chalk.dim("Scope")}       ${scope}`);
+  console.log(`  ${chalk.dim("Occurrences")} ${c.occurrences.length} comment${c.occurrences.length === 1 ? "" : "s"}`);
+  if (c.pathScope) {
+    console.log(`  ${chalk.dim("Path scope")}  ${c.pathScope}`);
+  }
+  console.log();
+
+  console.log(`  ${chalk.dim("Evidence:")}`);
+  for (const o of c.occurrences.slice(0, 3)) {
+    console.log(`    ${chalk.dim("PR #" + o.prNumber)} ${o.path ?? ""}`);
+  }
+  if (c.occurrences.length > 3) {
+    console.log(chalk.dim(`    +${c.occurrences.length - 3} more`));
+  }
+
+  if (c.humanSignal) {
+    const s = c.humanSignal;
+    const hasSignal = s.agreementCount + s.rejectionCount + s.plusOneCount + s.minusOneCount > 0;
+    if (hasSignal) {
+      const parts: string[] = [];
+      if (s.agreementCount > 0) parts.push(chalk.green(`Agreed: ${s.agreementCount}`));
+      if (s.rejectionCount > 0) parts.push(chalk.red(`Dismissed: ${s.rejectionCount}`));
+      if (s.plusOneCount > 0) parts.push(`👍 ${s.plusOneCount}`);
+      if (s.minusOneCount > 0) parts.push(`👎 ${s.minusOneCount}`);
+      console.log(`  ${chalk.dim("Human signal")} ${parts.join(" · ")}`);
+      if (s.agreementAuthors?.length) {
+        console.log(`  ${chalk.dim("Agreed by")}   ${chalk.green(s.agreementAuthors.map((a) => `@${a}`).join(", "))}`);
+      }
+      if (s.firstAgreementExcerpt) {
+        console.log(`  ${chalk.dim("Agreement")}  ${chalk.green(`"${s.firstAgreementExcerpt}"`)}`);
+      }
+      if (s.rejectionAuthors?.length) {
+        console.log(`  ${chalk.dim("Dismissed by")}${chalk.red(s.rejectionAuthors.map((a) => `@${a}`).join(", "))}`);
+      }
+      if (s.firstRejectExcerpt) {
+        console.log(`  ${chalk.dim("Dismissal")}  ${chalk.yellow(`"${s.firstRejectExcerpt}"`)}`);
+      }
+    }
+  }
+  console.log();
+
+  console.log(`  ${chalk.dim("Patch:")}`);
+  const patchLines = c.draft.content.split("\n").slice(0, 8);
+  for (const line of patchLines) {
+    console.log(chalk.green(`    ${line}`));
+  }
+  if (c.draft.content.split("\n").length > 8) {
+    console.log(chalk.dim("    ..."));
+  }
+  console.log();
+}
+
+export { printCandidateDetails };

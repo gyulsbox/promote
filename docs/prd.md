@@ -2,14 +2,27 @@
 
 > 반복되는 AI review comment를 사라지는 PR noise가 아니라, repo가 다음 작업에서 다시 읽을 수 있는 durable memory 후보로 승격시키는 도구.
 
-- **Working title**: Review Memory Router
+> **Living document caveat.** This PRD captures the original product thesis and design rationale through v0.4. For current behavior (CLI flags, config keys, model defaults, clustering modes, supported providers) consult **`README.md`** — it's the canonical source. Section-by-section inline details below may lag the code; the README + source tree always reflect what actually ships.
+
+- **Working title**: Review Memory Router (shipped as `promote-cli`)
 - **Alternative names**: Promote, Memory Router, Review-to-Memory, Comment Router, Repo Memory Router
 - **Document type**: Product Requirements Document
-- **Status**: Draft v0.1
-- **Date**: 2026-05-19
+- **Status**: v0.4 implementation landed on the v0.2–v0.4 overhaul branch.
+- **Date**: 2026-05-19 (initial) · 2026-05-20 (v0.4 sync)
 - **Primary author**: Hayden
 - **Primary mode**: OSS-first, product-expandable
-- **Interface decision**: undecided. CLI / GitHub App / MCP / hosted dashboard are treated as delivery surfaces over the same core engine.
+- **Interface decision**: CLI is shipped. GitHub Action / MCP / hosted App tracked as next surfaces over the same core engine.
+
+### Implementation status snapshot (2026-05-20)
+
+| Block | Scope | Status |
+|---|---|---|
+| **v0.1 — CLI MVP** | scan → cluster → classify → digest → apply | Shipped |
+| **v0.2 — Clustering overhaul + P0/P1 bug fixes** | similarity re-norm, secret redaction, HAC, LLM tree-reduce, rolling medoid, cross-run dedup, ADR auto-numbering, snooze expiry | Shipped |
+| **v0.3 — Normalizer hardening** | SeverityMarker (P0-P3, nit/must/should, `[!WARNING]`), per-bot signature stripping, Ko/Ja action verbs | Shipped |
+| **v0.4 — Human reply/reaction signal** | capture `in_reply_to_id` + 👍/👎, regex+LLM sentiment, per-cluster aggregation, prompt context, confidence adjustment, review UI | Shipped |
+| **v0.5 — Headless mode / GitHub Action** | `--no-interactive`, `--min-confidence`, `--create-pr` | Planned |
+| **v0.6 — MCP server** | tool exposure to Claude Code / Codex / Copilot | Planned |
 
 ---
 
@@ -501,41 +514,54 @@ Claude Code / AI client
 
 The system must support a repository-level config file.
 
-Suggested file:
+The shipping file is **`.promote.yml`**. See `README.md` for the
+authoritative schema; the snapshot below shows the v2 shape (model defaults
+vary per provider — `promote init` writes the right block for the chosen
+provider):
 
 ```yaml
-# .review-memory-router.yml
-version: 1
+# .promote.yml
+version: 2
 
-aiReviewers:
-  - github-copilot[bot]
-  - coderabbitai[bot]
-  - greptile-apps[bot]
-  - claude[bot]
+language:
+  preferredOutput: en   # en | ja | ko
+
+# aiReviewers:          # bot logins to include — defaults to a curated list
+#   - github-copilot[bot]
+#   - coderabbitai[bot]
 
 memoryTargets:
   agents:
     preferredFiles:
-      - AGENTS.md
-      - CLAUDE.md
-      - .github/copilot-instructions.md
+      - AGENTS.md       # or CLAUDE.md, GEMINI.md, etc., per chosen tool
   pathScoped:
-    preferredDir: .github/instructions
+    preferredDir: .claude/rules
   adr:
     dir: docs/adr
-    template: docs/adr/TEMPLATE.md
-  tests:
-    mode: stub-only
+    filenameFormat: "{number}-{slug}.md"
 
 thresholds:
-  minOccurrences: 3
+  minOccurrences: 2
   windowDays: 60
+  similarityThreshold: 0.80
   minConfidence: 0.75
 
-output:
-  digestMode: markdown
-  createPr: false
+llm:
+  provider: openai      # openai | anthropic | google
+  classificationModel: gpt-4.1-mini
+  clusteringModel: gpt-4.1-mini       # used by LLM-direct clustering + llmRefine
+  clusteringStrategy: embedding       # "embedding" (HAC) or "llm-direct" (semantic)
+  draftingModel: gpt-4.1-nano
+  embeddingModel: text-embedding-3-small
+
+privacy:
+  redactSecrets: true                  # strip AWS keys, tokens, JWTs before LLM
+  sendDiffHunksToLLM: false            # opt-in: send diff context for accuracy
 ```
+
+Removed since the original PRD draft: `output.digestMode`, `output.createPr`,
+`adr.template`, `tests.mode`. `--write` flag and per-target write phase
+collapsed into per-candidate interactive apply during scan.
 
 ### FR-002: Historical PR review comment ingestion
 
@@ -605,6 +631,15 @@ Normalization includes:
 - extract mentioned symbols, files, libraries, commands, rules
 - normalize whitespace
 
+#### v0.3 additions
+
+Bot output formats from CodeRabbit, Greptile, Copilot, and Claude evolved through 2025; normalization had to keep up.
+
+- **Severity marker extraction** (`extractSeverityMarker`) — recognises `P0`–`P3`, `nit:`, `**Nitpick:**`, `**Important:**`, `**Suggestion:**`, `critical:`, `blocker:`, `must:`, `should:`, `could:`, `minor:` and GitHub Alert headers `[!WARNING]` / `[!CAUTION]` / `[!IMPORTANT]` / `[!TIP]` / `[!NOTE]`. Mapped to `blocker | important | suggestion | nit | unknown` and exposed on `NormalizedComment.severityMarker`.
+- **Per-bot signature stripping** (`bot-stripper.ts`) — author-conditional rules. `coderabbitai` footers (`⚡ CodeRabbit…`, collapsible `<details>`) only strip on CodeRabbit comments. GitHub Alert *header lines* are removed across all bots (after severity extraction) while the alert body is preserved.
+- **Korean / Japanese action verbs** — `extractActionVerbs(text, language?)` accepts a language hint and runs the Ko/Ja verb set (`사용`, `반드시`, `避け`, `必ず`, `削除`, `推奨`, …) only when applicable.
+- **Ordering** — `severity → bot strip → markdown strip → language detect → identifiers/paths → action verbs (with language)`. Severity is read from the *original* body so labels inside collapsible blocks still register.
+
 ### FR-007: Embedding / fingerprint generation
 
 The system should generate a similarity representation per comment.
@@ -629,51 +664,60 @@ normalized body
 
 The system must group similar comments into clusters.
 
-Default thresholds:
+Default thresholds (updated v0.2):
 
 ```yaml
 minOccurrences: 3
 windowDays: 60
-similarityThreshold: 0.82
+similarityThreshold: 0.85   # raised from 0.82 — code-review vocabulary is narrow
 ```
 
-Clustering should consider:
+Clustering signals:
 
-- semantic similarity
-- path similarity
-- identifier overlap
-- repeated phrasing
-- reviewer source
+- semantic similarity (embedding cosine, weight 0.6)
+- identifier overlap (Jaccard, weight 0.25, applied only when both members have identifiers)
+- path overlap (longest-common-prefix, weight 0.15, applied only when both members have paths)
+- weights re-normalised by present-features sum so pure-text comments collapse to cosine similarity (v0.2 A-1)
+
+#### v0.2 clustering pipeline
+
+The implementation goes beyond a single greedy pass:
+
+1. **Deterministic ordering** — embeddings sorted by L2 norm descending, LLM input sorted by body length descending (addresses arXiv:2502.04134 "The Order Effect")
+2. **Primary: HAC with average linkage and distance threshold** (`src/cluster/hac-cluster.ts`) — stable, deterministic, O(N²) acceptable up to ~500 comments
+3. **Fallback: greedy single-linkage** for very large inputs (`src/cluster/greedy-cluster.ts`), with **rolling medoid** representative (recomputed on each member insertion, avoids representative drift)
+4. **LLM-direct mode** for providers without embeddings (e.g. Anthropic-only): **batched tree-reduce** (`src/cluster/llm-cluster.ts`) — batches of 30 with medoid extraction, then second-pass cluster the medoids
+5. **Borderline refinement** (`src/cluster/llm-refine.ts`) — pairs within `threshold ± 0.05` get a yes/no LLM merge decision (LLMEdgeRefine, EMNLP 2024)
+6. **Cluster identity persistence** — `clusters.medoid_embedding` + `clusters.fingerprint` stored; `findClusterByEmbedding(repo, embedding, 0.92)` re-identifies clusters across scans
 
 ### FR-009: Existing memory scan
 
-Before drafting a candidate, the system should scan relevant memory files to avoid duplicate suggestions.
+Before drafting a candidate, the system scans relevant memory files to avoid duplicate suggestions.
 
-Files to detect:
-
-```text
-AGENTS.md
-AGENTS.override.md
-CLAUDE.md
-CLAUDE.local.md
-.github/copilot-instructions.md
-.github/instructions/*.instructions.md
-.claude/rules/*
-docs/adr/*.md
-README.md
-```
-
-MVP can scan:
+Default files (`src/memory/memory-scanner.ts` `DEFAULT_MEMORY_FILES`):
 
 ```text
 AGENTS.md
 CLAUDE.md
 .github/copilot-instructions.md
-.github/instructions/*.instructions.md
-docs/adr/*.md
+GEMINI.md
+.cursorrules
+.windsurfrules
 ```
 
-The scan should not blindly send full files to the LLM. It should extract headings, relevant snippets, and matching sections.
+Default directories scanned for `*.md` / `*.instructions.md` / `*.mdc`:
+
+```text
+.github/instructions/
+.claude/rules/
+.cursor/rules/
+.windsurf/rules/
+docs/adr/
+```
+
+**Config augmentation** (v0.2 A-7): the scanner reads `config.memoryTargets.agents.preferredFiles`, `config.memoryTargets.pathScoped.preferredDir`, and `config.memoryTargets.adr.dir`, and unions them with the defaults — so custom tool presets surface their own paths.
+
+The scan extracts headings and relevant snippets only; it does not send entire files to the LLM.
 
 ### FR-010: Routing classification
 
@@ -683,6 +727,7 @@ Output schema:
 
 ```ts
 type RoutingDecision = {
+  clusterValid: boolean
   target:
     | "none"
     | "pr_only"
@@ -705,6 +750,24 @@ type RoutingDecision = {
 }
 ```
 
+#### Inputs surfaced to the classification LLM (v0.3 + v0.4)
+
+The prompt now carries more context than the original PRD specified:
+
+- **Severity prefix per example** (v0.3 C-7) — `[blocker] PR #347 [src/api.ts]: ...` when the comment was tagged `P0`, `**Important:**`, `[!WARNING]`, etc.
+- **Human reaction signal** (v0.4 D-6) — `"Human reviewer reactions: 2 reviewer(s) agreed, 1 reviewer(s) indicated this is a special case or intentional, 👍 3."` plus a `Dismissal context: "<excerpt>"` line when a rejection reply was found
+- **Optional diff hunk** (`config.privacy.sendDiffHunksToLLM`, default off) — first 150 chars of `diffHunk`, newlines collapsed to `↵`
+- **Existing memory snippets** (FR-009) — headings + matching paragraphs from `AGENTS.md`, `CLAUDE.md`, path-scoped rules, ADRs
+
+#### Post-LLM confidence adjustment (v0.4 D-7)
+
+```ts
+if (humanSignal.rejectionCount > 0) needsHumanDecision = true;
+if (humanSignal.agreementCount >= 2) confidence = Math.min(0.97, confidence + 0.05);
+```
+
+Reviewer rejection overrides LLM confidence — humans get the last word on dismissed patterns.
+
 ### FR-011: Conservative behavior
 
 If confidence is below the configured threshold, the system must not propose a memory PR by default.
@@ -720,6 +783,16 @@ needs_human_decision
 ### FR-012: Draft generation
 
 For accepted candidates, the system must generate a draft patch appropriate to the target.
+
+#### Target file resolution (v0.2 A-4, A-8)
+
+`resolveTargetFile(target, candidate, config)` in `src/cli/commands/promote.ts`:
+
+- **`agents`** — `config.memoryTargets.agents.preferredFiles[0]` (e.g. `CLAUDE.md`, `AGENTS.md`)
+- **`path_scoped_rule`** — `{config.memoryTargets.pathScoped.preferredDir}/{slug-of-pathScope}.instructions.md`
+- **`adr`** — `{config.memoryTargets.adr.dir}/{NNN}-{slug-of-summary}.md` where `NNN` is `max(existing N) + 1` read from the ADR directory; `slug` is lowercased, hyphenated, max 50 chars
+- **`test`** — `docs/test-stubs/{slug-of-summary}.md` (previously a placeholder string that no file writer would accept)
+- Parent directories auto-created on write
 
 Examples:
 
@@ -934,9 +1007,23 @@ candidate
 promoted
 ignored
 snoozed
-closed_duplicate
 needs_human_decision
 ```
+
+#### Cross-run dedup implementation (v0.2 A-6)
+
+- `clusters.fingerprint TEXT` and `candidates.cluster_fingerprint TEXT` columns
+- `getCandidateByClusterFingerprint(repo, fingerprint)` looked up before classify
+- `upsertCandidateRecord` uses `ON CONFLICT(id) DO UPDATE` — drafts refresh, status preserved
+- Status flow: matching fingerprint with `promoted` / `ignored` → skip entirely; matching `candidate` / `needs_human_decision` → reuse ID and refresh draft; no match → allocate new ID `candidate_{maxNum+1}`
+
+#### Stable candidate IDs across scans (v0.4 UX)
+
+Candidate IDs (`candidate_001`, `candidate_002`, …) are deterministic across re-scans of the same repo. The user can refer to `candidate_003` days later and get the same pattern. Implementation lives in `src/cli/commands/scan.ts` (pre-assignment pass before the classify loop).
+
+#### Snooze expiry auto-reset (v0.2 A-5)
+
+`resetExpiredSnoozes(db, repo)` runs at the start of every `scan` and flips `status='snoozed' AND snoozed_until <= now()` rows back to `candidate`. User is notified of how many were reactivated.
 
 ### FR-017: Audit trail
 
@@ -957,13 +1044,15 @@ Requirements:
 - cluster semantically similar comments across languages
 - preserve original evidence language
 - generate draft in repository-preferred language
+- digest output (`Human signal`, `Dismissal`, …) translates to the configured language
 - config option:
 
 ```yaml
 language:
-  preferredOutput: ja
-  fallback: en
+  preferredOutput: ja   # en | ko | ja
 ```
+
+> The previous `language.fallback` field was removed in v0.4 — it was declared in the schema but never read anywhere in the codebase. Output language is determined by `preferredOutput` only; LLM responses are kept in that language verbatim.
 
 ### FR-019: Cost controls
 
@@ -998,6 +1087,82 @@ type LLMProvider = {
   generateObject<T>(input: GenerateObjectInput<T>): Promise<T>
 }
 ```
+
+### FR-021: Human reply/reaction signal *(v0.4)*
+
+The system must aggregate human responses to bot comments and use them as classification context. Bot comments are not always trustworthy in isolation — a reviewer's "this is intentional" reply is a stronger signal than the bot's confidence.
+
+#### What is captured
+
+GitHub's `pulls.listReviewCommentsForRepo` response already contains everything needed; no extra API calls:
+
+- `in_reply_to_id` — the parent comment a reply targets
+- `reactions["+1"]` / `reactions["-1"]` — 👍/👎 counts on the comment itself
+
+`RawReviewComment` carries `inReplyToId?: string` and `reactions?: { plusOne, minusOne }`.
+
+#### Sentiment classification (`src/normalize/reply-sentiment.ts`)
+
+Two-stage to keep cost bounded:
+
+1. **Heuristic regex** — `classifyReplySentiment(body) → "agree" | "reject" | "neutral"`. Patterns cover English (`lgtm`, `good catch`, `intentional`, `by design`, `won't fix`, `not applicable`), Korean (`동의`, `맞`, `수정`, `완료`, `예외`, `의도적`, `특수 케이스`, `설계상`), and Japanese (`了解`, `意図的`, `例外`). Non-ASCII patterns omit `\b` because JS regex word boundary is ASCII-only.
+2. **LLM batched fallback** — `classifyAmbiguousReplies(replies[], model, costTracker)` for `neutral` replies longer than 100 chars. One `generateObject` call with a structured `{results: [{id, sentiment}]}` schema. Emits a stderr warning if the LLM returns fewer items than requested.
+
+#### Per-bot context map (`src/ingest/reply-context.ts`)
+
+```ts
+buildReplyContextMap(
+  aiComments: RawReviewComment[],
+  humanComments: RawReviewComment[],
+  model: LanguageModel,
+  costTracker: CostTracker,
+): Promise<Map<botCommentId, { replies: HumanReply[]; reactions: { plusOne; minusOne } }>>
+```
+
+Seeds the map with reactions from bot comments themselves, links each human reply whose `inReplyToId` targets a bot comment. Wrapped in try/catch by callers; on failure the map is empty and the rest of the pipeline runs without the signal.
+
+#### Per-cluster aggregation
+
+```ts
+type HumanReactionSignal = {
+  agreementCount: number
+  rejectionCount: number
+  plusOneCount: number
+  minusOneCount: number
+  firstRejectExcerpt?: string  // first dismissal reply body, ≤ 120 chars
+}
+```
+
+`aggregateHumanSignal(cluster, replyContextMap)` walks `cluster.members`, sums the per-comment context. Assigned to `cluster.humanSignal` and propagated to `PromotionCandidate.humanSignal`.
+
+#### Influence on the pipeline
+
+- **Prompt** (FR-010) — the classification prompt includes a Human reviewer reactions line plus the dismissal excerpt
+- **Confidence** — `rejectionCount > 0` forces `needsHumanDecision = true`; `agreementCount >= 2` adds `+0.05` to confidence (capped at 0.97)
+- **Review UI** (`promote review` / `promote <id>`) — renders `Human signal  Agreed: 2 · Dismissed: 1 · 👍 3` and the dismissal excerpt
+- **Persistence** — `candidates.human_signal_json TEXT` column; migration is idempotent
+
+### FR-022: Secret redaction implementation *(v0.2)*
+
+NFR-003 specified secret redaction; FR-022 records the concrete implementation.
+
+**Module**: `src/normalize/redact.ts`
+
+Detected and replaced with `[REDACTED]` before *every* LLM call (classification prompt and draft generator):
+
+- AWS access key — `AKIA[0-9A-Z]{16}` + trailing secret
+- GitHub token — `gh[poirs]_[0-9A-Za-z]{36,}`
+- Slack token — `xox[baprs]-[0-9]{12}-[0-9A-Za-z-]+`
+- Stripe key — `(sk|pk)_(test|live)_[0-9a-zA-Z]{24,}`
+- JWT — `eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+`
+- URL credentials — `https?://user:pass@host`
+- Generic high-entropy — standalone hex/base64 tokens of 32+ chars
+
+Controlled by `config.privacy.redactSecrets` (default `true`). Opt-out for users who want untouched LLM input.
+
+### FR-023: Per-cluster error isolation *(v0.2)*
+
+`src/core/engine.ts` wraps each cluster's `classifyCluster` + `generateDraft` in `try/catch`. Failures increment `stats.failedClusters` and emit a progress event; the scan continues with the next cluster. Replaces the previous behaviour where any LLM error aborted the entire scan.
 
 ---
 
@@ -2102,87 +2267,36 @@ This makes the tool complementary rather than adversarial.
 
 ## 24. Roadmap
 
-### Phase 0: Manual prototype
+### Phase 0: Manual prototype — *done*
 
-Goal: validate with exported comments.
+- JSON/CSV input, markdown digest, no GitHub auth
+- Validated thesis on real repo history
 
-- Input: JSON/CSV of review comments
-- Output: markdown digest
-- Manual config
-- No GitHub auth yet
+### Phase 1: CLI MVP — *done (v0.1)*
 
-Success:
+- GitHub token auth, fetch / filter / cluster / LLM classify / draft / digest / local apply
+- Multi-provider BYOK (OpenAI, Anthropic, Google)
+- Tool presets for Claude, Codex, Copilot, Cursor, Windsurf, Gemini
 
-- At least 3 useful promotion candidates from real repo history.
+### Phase 2: Pipeline hardening — *done (v0.2 + v0.3 + v0.4)*
 
-### Phase 1: CLI MVP
+- **v0.2 — clustering overhaul + P0/P1 bugs** (HAC, LLM tree-reduce, rolling medoid, similarity re-norm, secret redaction, cross-run dedup, snooze expiry, ADR auto-numbering, per-cluster error isolation)
+- **v0.3 — normalizer hardening** (SeverityMarker for P0–P3 + `[!WARNING]`, per-bot signature stripping, Ko/Ja action verbs)
+- **v0.4 — human reply/reaction signal** (sentiment classification, per-cluster aggregation, prompt context, confidence adjustment, review UI surfacing, SQLite persistence)
+- **CLI UX** — `--write` removed, per-candidate immediate apply, `promote review` multiselect, stable candidate IDs across scans
 
-Goal: end-to-end local workflow.
+For the full change log, run `git log main..HEAD` on the branch.
 
-Features:
+### Phase 3: Headless mode / GitHub Action — *next (v0.5)*
 
-- GitHub token auth
-- fetch review comments
-- filter AI reviewers
-- cluster repeated comments
-- LLM classify/draft with BYOK
-- generate `digest.md`
-- apply patch locally
+- `--no-interactive` + `--min-confidence` for CI
+- `--create-pr` — branch + commit + push + open PR with evidence body
+- Example workflow template
+- Scheduled weekly digest for OSS repos
 
-Success:
+Success: External user runs it on a public repo and merges a generated memory PR.
 
-- Dogfood on at least one real repository.
-- Publish README and Zenn follow-up.
-
-### Phase 2: CLI + create PR
-
-Goal: produce memory PR from CLI.
-
-Features:
-
-- create branch
-- commit patch
-- push branch
-- open PR
-- PR body with evidence
-
-Success:
-
-- First merged generated memory PR.
-
-### Phase 3: GitHub Action
-
-Goal: scheduled digest for OSS repos.
-
-Features:
-
-- weekly schedule
-- digest issue creation
-- artifact output
-- optional PR creation
-
-Success:
-
-- External user runs it on a public repo.
-
-### Phase 4: Hosted GitHub App
-
-Goal: product MVP.
-
-Features:
-
-- app installation
-- webhook ingestion
-- weekly digest issue
-- slash command actions
-- memory PR creation
-- usage limits
-
-Success:
-
-- 5-10 teams use it for private or public repos.
-
-### Phase 5: MCP server
+### Phase 4: MCP server — *planned (v0.6)*
 
 Goal: agent-native workflow.
 
@@ -2192,26 +2306,27 @@ Features:
 - `list_promotion_candidates`
 - `create_memory_promotion_pr`
 - local BYOK support
-- optional hosted API mode
+- optional MCP sampling so no server key is required when client supports it
 
-Success:
+Success: Works from Claude Code or compatible MCP client.
 
-- Works from Claude Code or compatible MCP client.
+### Phase 5: Hosted GitHub App — *planned*
 
-### Phase 6: Memory health
+Goal: product MVP. App installation, webhook ingestion, weekly digest issue, slash command actions, memory PR creation, usage limits.
+
+Success: 5–10 teams use it for private or public repos.
+
+### Phase 6: Memory health — *planned*
 
 Goal: maintain memory quality over time.
 
-Features:
+- Stale rule detection
+- Conflicting instruction detection
+- Oversized memory file warning
+- Path-scope split suggestions
+- `promote history` — track promoted rules over time
 
-- stale rule detection
-- conflicting instruction detection
-- oversized memory file warning
-- path-scope split suggestions
-
-Success:
-
-- Tool helps remove or split memory, not only add to it.
+Success: Tool helps remove or split memory, not only add to it.
 
 ---
 
@@ -2257,74 +2372,90 @@ Product success after hosted beta:
 
 ## 26. Detailed CLI design
 
+The CLI is published as `promote-cli` (binary `promote`). Examples below use the binary name.
+
 ### 26.1 Commands
 
 ```bash
-review-memory-router init
-review-memory-router scan
-review-memory-router digest
-review-memory-router promote
-review-memory-router ignore
-review-memory-router snooze
-review-memory-router eval
+promote init                                    # interactive setup
+promote scan                                    # scan current repo, review interactively
+promote scan --repo owner/repo --since 90d      # scan specific repo
+promote review                                  # multiselect pending candidates, review selected
+promote <id>                                    # apply a specific candidate (confirm prompt)
+promote <id> --target adr                       # override routing target
+promote ignore <id> --reason "..."              # dismiss permanently
+promote snooze <id> --days 30                   # snooze for N days
 ```
+
+> The original PRD also listed `digest` and `eval` commands. `digest` was folded into `scan` (digest is always written to `.promote/digests/{date}.md`). `eval` is planned but not yet implemented.
 
 ### 26.2 `init`
 
-```bash
-review-memory-router init
-```
+Interactive setup walks through:
+
+1. LLM provider (OpenAI / Anthropic / Google) and BYOK key check
+2. Primary AI coding tool — Claude Code / OpenAI Codex / GitHub Copilot / Cursor / Windsurf / Gemini CLI. Each preset configures the right `rootFile` (`CLAUDE.md`, `AGENTS.md`, `.github/copilot-instructions.md`, etc.) and `pathScopedDir` (`.claude/rules`, nested `AGENTS.md`, `.github/instructions`, `.cursor/rules`, `.windsurf/rules`, nested `GEMINI.md`).
+3. Output language (`en` / `ko` / `ja`)
+4. AI reviewer allowlist (CodeRabbit, Copilot, Greptile, …)
 
 Creates:
 
 ```text
-.review-memory-router.yml
-.review-memory-router/
+.promote.yml
+.promote/                # SQLite DB, digest cache
 ```
 
 ### 26.3 `scan`
 
 ```bash
-review-memory-router scan --repo owner/repo --since 60d
+promote scan --repo owner/repo --since 60d
 ```
 
-Outputs stats:
+If `--repo` is omitted, the repo is detected from `git remote get-url origin`. After the digest is written, the CLI offers interactive review — each approval writes immediately to the target file (no batch apply phase).
+
+Outputs:
 
 ```text
 Fetched 842 PR review comments.
-Filtered 214 likely AI review comments.
-Found 18 repeated clusters.
-Generated 6 promotion candidates.
-Wrote digest to .review-memory-router/digests/2026-05-19.md
+AI reviewer comments      214
+Human comments            628
+Actionable AI comments    187
+Noise filtered            27
+PRs scanned               64
+Found 18 clusters (HAC + LLMEdgeRefine) (4.2s)
+Repeated clusters         6 (>= 3 occurrences)
+…
+6 candidate(s) found!
+Digest written to .promote/digests/2026-05-19.md
 ```
 
-### 26.4 `digest`
+### 26.4 `promote review`
+
+Lists all pending candidates (`status` in `candidate` or `needs_human_decision`), with `⚠` prefixing `needs_human_decision` entries. Multiselect with space/enter, then runs interactive review on the selection. Designed for "I'll review later" follow-up sessions.
+
+### 26.5 `promote <id>`
 
 ```bash
-review-memory-router digest --repo owner/repo --since 60d --out digest.md
+promote candidate_001
+promote candidate_001 --target adr           # override routing target
+promote candidate_001 --file CLAUDE.md       # override suggested file
 ```
 
-### 26.5 `promote`
+Loads the candidate from SQLite, prints full details (including human signal), asks for a confirm prompt, then writes the file. No `--write` flag — the confirm prompt is the gate.
+
+### 26.6 `promote ignore` / `promote snooze`
 
 ```bash
-review-memory-router promote candidate_001 --target agents --write
+promote ignore candidate_003 --reason "covered by lint rule already"
+promote snooze candidate_003 --days 30
 ```
 
-Options:
+Status is persisted in SQLite. Snoozed candidates auto-reactivate when their snooze period expires on the next `scan`.
+
+### 26.7 `promote eval` *(planned, v0.6+)*
 
 ```bash
---target agents|path_scoped_rule|adr|test|lint_or_type|docs
---file AGENTS.md
---write
---create-branch
---create-pr
---dry-run
-```
-
-### 26.6 `eval`
-
-```bash
-review-memory-router eval --dataset evals/routing.jsonl --model gpt-5.1-mini
+promote eval --dataset evals/routing.jsonl --model gpt-5.1-mini
 ```
 
 Outputs:
@@ -2760,28 +2891,41 @@ The `promote init` command auto-configures the correct file paths based on the u
 
 ## 33. Open questions
 
-1. Should the default output language follow repo docs or user config?
-2. Should human review comments be included, or only AI bot comments?
-3. How much source diff context is needed for good classification?
-4. Should `test` target generate test stubs or only recommendations?
-5. How should duplicate existing memory be detected robustly?
-6. What should be the first supported LLM provider?
-7. Should hosted mode store comment text, or only embeddings/summaries?
-8. What is the safest default for private repos?
-9. How should path-scoped rules map across Copilot, Claude, Codex, and Cursor-like tools?
-10. Should the tool support Japanese-first docs as a first-class feature?
+### Resolved during v0.2–v0.4
+
+1. ~~Should the default output language follow repo docs or user config?~~ → User config via `language.preferredOutput` (en/ko/ja). Removed unused `fallback`.
+2. ~~Should human review comments be included, or only AI bot comments?~~ → Both. AI bot comments are clustered; human replies to those comments contribute `humanSignal` (agree/reject/+1/-1) to classification confidence and `needsHumanDecision` (v0.4).
+3. ~~How much source diff context is needed for good classification?~~ → Opt-in via `privacy.sendDiffHunksToLLM`; first 150 chars of diff hunk per example. Off by default.
+4. ~~Should `test` target generate test stubs or only recommendations?~~ → Recommendation written to `docs/test-stubs/{slug}.md` (v0.2 A-4). Stub mode left as future work.
+5. ~~How should duplicate existing memory be detected robustly?~~ → Heading + snippet scan of memory files (FR-009); LLM is told what already exists.
+6. ~~What should be the first supported LLM provider?~~ → Multi-provider BYOK from v0.1 (OpenAI, Anthropic, Google). Anthropic special-cased to use LLM-direct clustering when no embedding API is available.
+9. ~~How should path-scoped rules map across Copilot, Claude, Codex, and Cursor-like tools?~~ → Tool presets in `promote init` (Claude / Codex / Copilot / Cursor / Windsurf / Gemini), each with the right root file and path-scoped dir.
+10. ~~Should the tool support Japanese-first docs as a first-class feature?~~ → Yes, `preferredOutput: ja` produces JP output across summary, reason, and digest. Korean too.
+
+### Still open
+
+- What is the safest default for private repos? (related to FR-022 redaction + hosted App design)
+- Should hosted mode store comment text, or only embeddings/summaries?
+- For CI/Actions headless mode, what is the right default `--min-confidence` floor?
+- Should `promote eval` produce a public leaderboard or a private accuracy report?
+- Should `humanSignal.rejectionCount > 0` *always* force `needs_human_decision`, or should the rule weaken once the LLM also recognises the dismissal context?
 
 ---
 
 ## 34. Appendix A: Candidate object
 
+Shipped shape (`src/core/types.ts`):
+
 ```ts
 type PromotionCandidate = {
-  id: string
-  repo: string
+  id: string                    // candidate_NNN, stable across scans
+  repo: string                  // owner/name
   clusterId: string
+  clusterFingerprint?: string   // v0.2 — used for cross-run dedup
   summary: string
   target:
+    | "none"
+    | "pr_only"
     | "agents"
     | "path_scoped_rule"
     | "adr"
@@ -2791,7 +2935,12 @@ type PromotionCandidate = {
   confidence: number
   suggestedFile?: string
   pathScope?: string
-  suggestedPatch: string
+  draft: {                      // replaces flat suggestedPatch
+    targetFile: string
+    content: string
+    insertionHint: string
+    fullPatch?: string
+  }
   reasoning: string
   alternatives: Array<{
     target: string
@@ -2811,6 +2960,13 @@ type PromotionCandidate = {
     | "ignored"
     | "snoozed"
     | "needs_human_decision"
+  humanSignal?: {               // v0.4
+    agreementCount: number
+    rejectionCount: number
+    plusOneCount: number
+    minusOneCount: number
+    firstRejectExcerpt?: string
+  }
 }
 ```
 
@@ -2818,12 +2974,13 @@ type PromotionCandidate = {
 
 ## 35. Appendix B: Sample config
 
+Shipped shape — generated by `promote init`:
+
 ```yaml
 version: 1
 
 language:
-  preferredOutput: ja
-  fallback: en
+  preferredOutput: en   # en | ko | ja
 
 aiReviewers:
   - github-copilot[bot]
@@ -2834,12 +2991,9 @@ aiReviewers:
 memoryTargets:
   agents:
     preferredFiles:
-      - AGENTS.md
-      - CLAUDE.md
-      - .github/copilot-instructions.md
+      - CLAUDE.md            # Claude Code preset; AGENTS.md for Codex, etc.
   pathScoped:
-    preferredDir: .github/instructions
-    format: copilot-instructions
+    preferredDir: .claude/rules
   adr:
     dir: docs/adr
     filenameFormat: "{number}-{slug}.md"
@@ -2849,25 +3003,26 @@ memoryTargets:
 thresholds:
   minOccurrences: 3
   windowDays: 60
-  similarityThreshold: 0.82
+  similarityThreshold: 0.85   # raised from 0.82 in v0.2 B-3
   minConfidence: 0.75
 
 llm:
-  provider: openai
-  classificationModel: gpt-5.1-mini
-  draftingModel: gpt-5.1
-  embeddingModel: text-embedding-3-small
+  provider: anthropic
+  classificationModel: claude-sonnet-4-5
+  draftingModel: claude-haiku-4-5
+  embeddingModel: text-embedding-3-small   # OpenAI provider only
 
 privacy:
-  sendDiffHunksToLLM: false
-  redactSecrets: true
-  storeCommentText: true
-
-output:
-  digestMode: markdown
-  inlineSuggestions: false
-  createPr: false
+  redactSecrets: true         # v0.2 A-2 — AWS/GitHub/Slack/Stripe/JWT/URL/base64
+  sendDiffHunksToLLM: false   # opt-in — first 150 chars of diff hunk per example
 ```
+
+**Removed since the original PRD:**
+
+- `language.fallback` — declared but never used; removed in v0.4
+- `output.*` — `digestMode` is always markdown; `inlineSuggestions` / `createPr` are planned for v0.5 GitHub Action mode and not part of the local CLI config
+- `pathScoped.format` — the format is derived from the AI tool preset chosen at `init` time
+- `privacy.storeCommentText` — comment text is always stored locally (SQLite) for cross-run dedup; deletion is handled per-repo via `.promote/` removal
 
 ---
 

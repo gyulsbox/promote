@@ -33,6 +33,9 @@ export function greedyCluster(
     if (bestCluster && bestSimilarity >= threshold) {
       bestCluster.members.push(comment);
       bestCluster.memberEmbeddings.push(embedding);
+      const medoid = findMedoid(bestCluster);
+      bestCluster.representative = medoid.representative;
+      bestCluster.representativeEmbedding = medoid.representativeEmbedding;
     } else {
       clusters.push({
         id: generateClusterId(comment),
@@ -46,6 +49,37 @@ export function greedyCluster(
   }
 
   return clusters;
+}
+
+function findMedoid(cluster: Cluster): { representative: NormalizedComment; representativeEmbedding: number[] } {
+  const n = cluster.members.length;
+  if (n === 1) return { representative: cluster.members[0], representativeEmbedding: cluster.memberEmbeddings[0] };
+
+  let bestIndex = 0;
+  let bestAvgSim = -1;
+
+  for (let i = 0; i < n; i++) {
+    let totalSim = 0;
+    for (let j = 0; j < n; j++) {
+      if (i === j) continue;
+      totalSim += computeSimilarity(
+        cluster.members[i],
+        cluster.members[j],
+        cluster.memberEmbeddings[i],
+        cluster.memberEmbeddings[j],
+      );
+    }
+    const avgSim = totalSim / (n - 1);
+    if (avgSim > bestAvgSim) {
+      bestAvgSim = avgSim;
+      bestIndex = i;
+    }
+  }
+
+  return {
+    representative: cluster.members[bestIndex],
+    representativeEmbedding: cluster.memberEmbeddings[bestIndex],
+  };
 }
 
 function generateClusterId(representative: NormalizedComment): string {
