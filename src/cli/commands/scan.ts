@@ -34,6 +34,7 @@ import { createTimedSpinner, getClassifyMessage, getDraftMessage, getClusterMess
 import { runInteractiveReview } from "./review.js";
 import { applyPromotion } from "./promote.js";
 import { NAME, VERSION } from "../../version.js";
+import { notifyIfOutdated } from "../update-check.js";
 
 const CLOSING_QUOTES: Record<string, string[]> = {
   en: [
@@ -55,11 +56,27 @@ export type ScanOptions = {
   since?: string;
   config?: string;
   out?: string;
+  mode?: string;
   verbose?: boolean;
 };
 
 export async function runScan(options: ScanOptions) {
+  await notifyIfOutdated();
   const config = loadConfig(options.config);
+
+  // --mode overrides clusteringStrategy at runtime
+  if (options.mode) {
+    const mode = options.mode.toLowerCase();
+    if (mode === "quick") {
+      config.llm.clusteringStrategy = "embedding";
+    } else if (mode === "broad") {
+      config.llm.clusteringStrategy = "llm-direct";
+    } else {
+      out.error(`Invalid --mode: "${options.mode}". Use 'quick' or 'broad'.`);
+      process.exit(1);
+    }
+  }
+
   const repoStr = options.repo ?? detectCurrentRepo();
   const repo = parseRepoRef(repoStr);
   const sinceDays = options.since
@@ -70,21 +87,81 @@ export async function runScan(options: ScanOptions) {
   mascotSays(`Scanning ${repo.fullName} (last ${sinceDays} days)`);
   out.stat("Tool", `${NAME} v${VERSION}`);
 
+  // Validate the chosen clustering strategy is achievable on this provider.
+  // "quick" (embedding+HAC) needs an embedding model; Anthropic has none.
+  // If the user explicitly asked for quick on Anthropic, offer to switch
+  // provider to OpenAI for this run (if their key is set) before resolving
+  // models — running the scan first and erroring later would waste time.
+  if (
+    config.llm.clusteringStrategy === "embedding" &&
+    config.llm.provider === "anthropic"
+  ) {
+    out.warn(
+      `Provider 'anthropic' has no embedding API — 'quick' mode (embedding+HAC) is not supported there.`,
+    );
+
+    const hasOpenAiKey = !!process.env.OPENAI_API_KEY;
+    const choice = await p.select({
+      message: hasOpenAiKey
+        ? "OPENAI_API_KEY detected. Switch this scan to OpenAI to use 'quick' mode?"
+        : "OpenAI key not detected. How do you want to proceed?",
+      options: hasOpenAiKey
+        ? [
+            { value: "switch", label: "Switch to OpenAI for this scan (recommended)", hint: "uses OpenAI defaults: gpt-5.4-mini + gpt-5.4-nano" },
+            { value: "broad", label: "Stay on Anthropic and use 'broad' mode instead", hint: "LLM-direct clustering — Claude's natural strength" },
+            { value: "cancel", label: "Cancel" },
+          ]
+        : [
+            { value: "broad", label: "Use 'broad' mode on Anthropic (recommended)", hint: "LLM-direct clustering — Claude's natural strength" },
+            { value: "instructions", label: "Show how to set OPENAI_API_KEY" },
+            { value: "cancel", label: "Cancel" },
+          ],
+    });
+
+    if (p.isCancel(choice) || choice === "cancel") {
+      out.info("Cancelled.");
+      process.exit(130);
+    }
+    if (choice === "instructions") {
+      out.info("Set OPENAI_API_KEY in your environment, then re-run:");
+      out.info("  export OPENAI_API_KEY=sk-...");
+      out.info(`  promote scan --repo ${repo.fullName} --mode quick`);
+      process.exit(0);
+    }
+    if (choice === "broad") {
+      config.llm.clusteringStrategy = "llm-direct";
+      out.info("Continuing with 'broad' mode on Anthropic.");
+    }
+    if (choice === "switch") {
+      config.llm.provider = "openai";
+      config.llm.classificationModel = "gpt-5.4-mini";
+      config.llm.clusteringModel = "gpt-5.4-mini";
+      config.llm.draftingModel = "gpt-5.4-nano";
+      config.llm.embeddingModel = "text-embedding-3-small";
+      out.info("Switched to OpenAI for this scan.");
+    }
+  }
+
   const octokit = createOctokit();
   const models = resolveModels(config.llm);
   const costTracker = new CostTracker(config.llm.classificationModel);
 
   const llmOnly = !models.embeddingModel;
-  out.stat(
-    "Provider",
-    `${config.llm.provider}${llmOnly ? " (LLM-direct clustering — no embedding API, llmRefine inactive)" : " (embeddings + HAC + llmRefine)"}`,
-  );
-  out.stat(
-    "Models",
-    llmOnly
-      ? `${config.llm.classificationModel} (classify) + ${config.llm.draftingModel} (draft)`
-      : `${config.llm.classificationModel} (classify) + ${config.llm.draftingModel} (draft) + ${config.llm.embeddingModel} (embed)`,
-  );
+  const forcedLlmDirect = config.llm.clusteringStrategy === "llm-direct" && !!models.embeddingModel;
+  const effectiveCluster = config.llm.clusteringModel ?? config.llm.classificationModel;
+  const clusterDifferent = effectiveCluster !== config.llm.classificationModel;
+  const providerSuffix = llmOnly
+    ? " (LLM-direct clustering — no embedding API, llmRefine inactive)"
+    : forcedLlmDirect
+      ? " (LLM-direct clustering — forced via clusteringStrategy, llmRefine inactive)"
+      : " (embeddings + HAC + llmRefine)";
+  out.stat("Provider", `${config.llm.provider}${providerSuffix}`);
+  const embeddingActive = !llmOnly && !forcedLlmDirect;
+  const modelParts: string[] = [`${config.llm.classificationModel} (classify)`];
+  if (clusterDifferent || forcedLlmDirect) modelParts.push(`${effectiveCluster} (cluster)`);
+  modelParts.push(`${config.llm.draftingModel} (draft)`);
+  if (embeddingActive) modelParts.push(`${config.llm.embeddingModel} (embed)`);
+  out.stat("Models", modelParts.join(" + "));
   out.stat("Output language", config.language.preferredOutput);
   out.divider();
 
@@ -143,6 +220,8 @@ export async function runScan(options: ScanOptions) {
     comments: normalized,
     embeddingModel: models.embeddingModel,
     classificationModel: models.classificationModel,
+    clusteringModel: models.clusteringModel,
+    clusteringStrategy: config.llm.clusteringStrategy,
     similarityThreshold: config.thresholds.similarityThreshold,
     costTracker,
     onProgress: () => {},

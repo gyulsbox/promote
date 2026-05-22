@@ -18,7 +18,12 @@ const clusterResultSchema = z.object({
   ),
 });
 
-const BATCH_SIZE = 30;
+// Smaller batches keep single-request token count well under common TPM limits
+// (e.g., OpenAI tier 1 = 30k TPM on full-tier chat models) and prevent
+// Anthropic response truncation that surfaces as "No object generated: could
+// not parse the response".
+const BATCH_SIZE = 15;
+const MAX_OUTPUT_TOKENS = 8000;
 
 export async function llmCluster(input: {
   comments: NormalizedComment[];
@@ -95,6 +100,7 @@ async function singlePassCluster(
     schema: clusterResultSchema,
     providerOptions: { openai: { strictJsonSchema: false } },
     temperature: 0,
+    maxOutputTokens: MAX_OUTPUT_TOKENS,
     ...seedIfSupported(model),
     system: `You group similar AI code review comments together.
 Two comments are similar if they point out the same issue, convention, or pattern — even if worded differently or in different languages.

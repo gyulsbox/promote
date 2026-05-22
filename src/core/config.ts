@@ -2,10 +2,12 @@ import { z } from "zod";
 import { readFileSync, existsSync } from "node:fs";
 import { parse as parseYaml } from "yaml";
 import { resolve } from "node:path";
+import chalk from "chalk";
 import type { PromoteConfig } from "./types.js";
+import { migrateConfig, CURRENT_CONFIG_VERSION } from "./migrations.js";
 
 const promoteConfigSchema = z.object({
-  version: z.literal(1),
+  version: z.literal(CURRENT_CONFIG_VERSION),
 
   language: z
     .object({
@@ -84,6 +86,15 @@ const promoteConfigSchema = z.object({
     .object({
       provider: z.enum(["openai", "anthropic", "google"]).default("openai"),
       classificationModel: z.string().default("gpt-4.1-mini"),
+      // Only affects LLM-direct clustering (anthropic, or any provider with
+      // clusteringStrategy=llm-direct) and llmRefine borderline merges.
+      // Defaults to classificationModel when unset.
+      clusteringModel: z.string().optional(),
+      // "embedding" uses HAC over embeddings; "llm-direct" forces semantic
+      // grouping via the clusteringModel even on providers with embeddings.
+      // Default is "embedding" — Anthropic auto-promotes to "llm-direct"
+      // internally since it has no embedding API.
+      clusteringStrategy: z.enum(["embedding", "llm-direct"]).optional(),
       draftingModel: z.string().default("gpt-4.1-mini"),
       embeddingModel: z.string().default("text-embedding-3-small"),
     })
@@ -101,15 +112,25 @@ export function loadConfig(configPath?: string): PromoteConfig {
   const filePath = configPath ?? resolve(process.cwd(), ".promote.yml");
 
   if (!existsSync(filePath)) {
-    return promoteConfigSchema.parse({ version: 1 });
+    return promoteConfigSchema.parse({ version: CURRENT_CONFIG_VERSION });
   }
 
   const raw = readFileSync(filePath, "utf-8");
   const parsed = parseYaml(raw);
-  return promoteConfigSchema.parse(parsed);
+  const { config, fromVersion, migrated } = migrateConfig(parsed);
+
+  if (migrated && fromVersion !== undefined) {
+    process.stderr.write(
+      chalk.dim(
+        `  Config migrated v${fromVersion} → v${CURRENT_CONFIG_VERSION} in memory. To persist, update 'version:' in ${filePath}.\n`,
+      ),
+    );
+  }
+
+  return promoteConfigSchema.parse(config);
 }
 
-export const DEFAULT_CONFIG_CONTENT = `version: 1
+export const DEFAULT_CONFIG_CONTENT = `version: 2
 
 # language:
 #   preferredOutput: en
@@ -147,6 +168,7 @@ export const DEFAULT_CONFIG_CONTENT = `version: 1
 # llm:
 #   provider: openai
 #   classificationModel: gpt-4.1-mini
+#   clusteringModel: gpt-4.1-mini    # used by LLM-direct clustering (anthropic) + llmRefine (openai/google)
 #   draftingModel: gpt-4.1-mini
 #   embeddingModel: text-embedding-3-small
 

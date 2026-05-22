@@ -17,6 +17,9 @@ export type PreClusterInput = {
   comments: NormalizedComment[];
   embeddingModel: EmbeddingModel | null;
   classificationModel: LanguageModel;
+  clusteringModel: LanguageModel;
+  /** "embedding" or "llm-direct"; forces LLM-direct even when embedding model is present */
+  clusteringStrategy?: "embedding" | "llm-direct";
   similarityThreshold: number;
   costTracker: CostTracker;
   onProgress?: (msg: string) => void;
@@ -29,22 +32,28 @@ export type PreClusterOutput = {
 };
 
 export async function preCluster(input: PreClusterInput): Promise<PreClusterOutput> {
-  const { comments, embeddingModel, classificationModel, costTracker, onProgress } = input;
+  const { comments, embeddingModel, clusteringModel, clusteringStrategy, costTracker, onProgress } = input;
 
   if (comments.length === 0) {
     return { clusters: [], allClusters: 0, mode: "embedding" };
   }
 
-  // If no embedding model (e.g. Anthropic), use LLM direct clustering
-  if (!embeddingModel) {
-    onProgress?.("Using LLM clustering (no embedding API)...");
+  // LLM-direct path: either no embedding API available (Anthropic), or the
+  // user explicitly opted into semantic clustering via clusteringStrategy.
+  const useLlmDirect = clusteringStrategy === "llm-direct" || !embeddingModel;
+  if (useLlmDirect) {
+    onProgress?.(
+      embeddingModel
+        ? "Using LLM clustering (forced via clusteringStrategy=llm-direct)..."
+        : "Using LLM clustering (no embedding API)...",
+    );
     // Sort by body length descending for deterministic, information-rich ordering
     const sortedComments = [...comments].sort(
       (a, b) => b.normalizedBody.length - a.normalizedBody.length,
     );
     const clusters = await llmCluster({
       comments: sortedComments,
-      model: classificationModel,
+      model: clusteringModel,
       costTracker,
       onProgress,
     });
@@ -98,7 +107,7 @@ export async function preCluster(input: PreClusterInput): Promise<PreClusterOutp
       clusters,
       threshold: input.similarityThreshold,
       margin: 0.15,
-      model: classificationModel,
+      model: clusteringModel,
       costTracker,
     });
   }

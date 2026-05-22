@@ -5,6 +5,7 @@ import { resolve, dirname } from "node:path";
 import chalk from "chalk";
 import { printWelcome, mascotSays } from "../mascot.js";
 import * as out from "../output.js";
+import { notifyIfOutdated } from "../update-check.js";
 
 type DetectedKey = {
   provider: string;
@@ -31,6 +32,7 @@ const KEY_CHECKS: Array<{ provider: string; envVars: string[]; label: string }> 
 ];
 
 export async function runInit() {
+  await notifyIfOutdated();
   printWelcome();
 
   p.intro(chalk.bgCyan(chalk.black(" promote init ")));
@@ -127,6 +129,28 @@ export async function runInit() {
     process.exit(0);
   }
 
+  // 5b. Clustering mode — affects what KIND of patterns surface
+  const clusteringStrategy = await p.select({
+    message: "What kind of patterns do you want surfaced?",
+    options: [
+      {
+        value: "embedding",
+        label: "Quick (recommended for most users)",
+        hint: "embedding+HAC — narrow code-level patterns, cheap, fast",
+      },
+      {
+        value: "llm-direct",
+        label: "Broad — convention/principle patterns",
+        hint: "LLM-direct semantic clustering — costs more but extracts repo-wide rules",
+      },
+    ],
+  });
+
+  if (p.isCancel(clusteringStrategy)) {
+    p.cancel("Setup cancelled.");
+    process.exit(0);
+  }
+
   // 6. Memory target — which AI tool's instruction format
   const memoryTarget = await p.select({
     message: "Which AI coding tool do you primarily use?",
@@ -201,6 +225,7 @@ export async function runInit() {
     provider: provider as string,
     language: language as string,
     threshold: threshold as string,
+    clusteringStrategy: clusteringStrategy as string,
     memoryFile,
     pathScopedDir: pathScopedDir as string,
     adrDir: adrDir as string,
@@ -393,13 +418,14 @@ function generateConfig(opts: {
   provider: string;
   language: string;
   threshold: string;
+  clusteringStrategy: string;
   memoryFile: string;
   pathScopedDir: string;
   adrDir: string;
 }): string {
   const models = getDefaultModels(opts.provider);
 
-  return `version: 1
+  return `version: 2
 
 language:
   preferredOutput: ${opts.language}
@@ -433,6 +459,8 @@ thresholds:
 llm:
   provider: ${opts.provider}
   classificationModel: ${models.classification}
+  clusteringModel: ${models.clustering}
+  clusteringStrategy: ${opts.clusteringStrategy}
   draftingModel: ${models.drafting}
   embeddingModel: ${models.embedding}
 
@@ -445,27 +473,40 @@ privacy:
 function getDefaultModels(provider: string) {
   switch (provider) {
     case "openai":
+      // draft uses nano — text generation is mechanical, classify needs more
+      // judgment (path_scoped_rule vs agents vs adr) and gets the better tier.
       return {
-        classification: "gpt-4.1-mini",
-        drafting: "gpt-4.1-mini",
+        classification: "gpt-5.4-mini",
+        clustering: "gpt-5.4-mini",
+        drafting: "gpt-5.4-nano",
         embedding: "text-embedding-3-small",
       };
     case "anthropic":
+      // classify uses sonnet for nuanced routing decisions; cluster + draft
+      // use haiku since LLM-direct clustering is the bulk cost driver on
+      // anthropic (no embedding API) and the grouping/drafting decision is
+      // mechanical enough that it doesn't need sonnet.
       return {
-        classification: "claude-sonnet-4-5",
+        classification: "claude-sonnet-4-6",
+        clustering: "claude-haiku-4-5",
         drafting: "claude-haiku-4-5",
         embedding: "text-embedding-3-small",
       };
     case "google":
+      // 'latest' aliases auto-track Google's current generation (Gemini 3 Flash
+      // for the flash tier, Gemini 3.1 Flash-Lite for the cheaper draft tier).
+      // classify needs flash (judgment); draft uses flash-lite (mechanical).
       return {
-        classification: "gemini-2.5-flash",
-        drafting: "gemini-2.5-flash",
+        classification: "gemini-flash-latest",
+        clustering: "gemini-flash-latest",
+        drafting: "gemini-flash-lite-latest",
         embedding: "gemini-embedding-001",
       };
     default:
       return {
-        classification: "gpt-4.1-mini",
-        drafting: "gpt-4.1-mini",
+        classification: "gpt-5.4-mini",
+        clustering: "gpt-5.4-mini",
+        drafting: "gpt-5.4-nano",
         embedding: "text-embedding-3-small",
       };
   }

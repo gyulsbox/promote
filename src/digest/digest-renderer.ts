@@ -80,8 +80,12 @@ export function renderDigest(
     const clusteringMode = embeddingMode === false
       ? "LLM-direct (no embedding API, llmRefine inactive)"
       : "embeddings + HAC + llmRefine";
+    const effectiveCluster = llm.clusteringModel ?? llm.classificationModel;
+    const clusterShown = effectiveCluster !== llm.classificationModel
+      ? `, \`${effectiveCluster}\` (cluster)`
+      : "";
     lines.push(`- Provider: \`${llm.provider}\` (${clusteringMode})`);
-    lines.push(`- Models: \`${llm.classificationModel}\` (classify), \`${llm.draftingModel}\` (draft)${embeddingMode !== false ? `, \`${llm.embeddingModel}\` (embed)` : ""}`);
+    lines.push(`- Models: \`${llm.classificationModel}\` (classify)${clusterShown}, \`${llm.draftingModel}\` (draft)${embeddingMode !== false ? `, \`${llm.embeddingModel}\` (embed)` : ""}`);
     lines.push(`- Output language: \`${config.language.preferredOutput}\``);
     lines.push(`- Thresholds: similarity \`${config.thresholds.similarityThreshold}\`, min confidence \`${config.thresholds.minConfidence}\`, min occurrences \`${config.thresholds.minOccurrences}\``);
     const effectiveWindow = sinceDays ?? config.thresholds.windowDays;

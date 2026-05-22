@@ -186,6 +186,17 @@ export type MemoryTargetsConfig = {
 export type LLMConfig = {
   provider: "openai" | "anthropic" | "google";
   classificationModel: string;
+  clusteringModel?: string;
+  /**
+   * "embedding" (default): use cheap embeddings + HAC for clustering, falling
+   *   back to LLM-direct only when the provider has no embedding API
+   *   (Anthropic).
+   * "llm-direct": force LLM-direct clustering even when embeddings are
+   *   available. Uses clusteringModel (or classificationModel if unset).
+   *   Trades cost for semantic-level grouping that produces broader
+   *   convention/principle candidates instead of narrow text-similarity ones.
+   */
+  clusteringStrategy?: "embedding" | "llm-direct";
   draftingModel: string;
   embeddingModel: string;
 };
@@ -200,7 +211,7 @@ export type PrivacyConfig = {
 };
 
 export type PromoteConfig = {
-  version: 1;
+  version: 2;
   language: LanguageConfig;
   aiReviewers: string[];
   memoryTargets: MemoryTargetsConfig;

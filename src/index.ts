@@ -48,6 +48,10 @@ program
   .option("--since <days>", "Time window, e.g. 60d (default: config windowDays)")
   .option("--out <path>", "Digest output file path")
   .option("--config <path>", "Path to .promote.yml")
+  .option(
+    "--mode <mode>",
+    "Clustering mode: 'quick' (embedding+HAC, cheap, narrow patterns — requires a provider with embedding API: OpenAI or Google) or 'broad' (LLM-direct, convention-level patterns, more costly — works on any provider). Overrides llm.clusteringStrategy in config.",
+  )
   .option("--verbose", "Verbose output")
   .action(async (options) => {
     try {

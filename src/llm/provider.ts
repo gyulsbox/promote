@@ -6,6 +6,7 @@ import type { LLMConfig } from "../core/types.js";
 
 export type ResolvedModels = {
   classificationModel: LanguageModel;
+  clusteringModel: LanguageModel;
   draftingModel: LanguageModel;
   embeddingModel: EmbeddingModel | null; // null = use LLM clustering
 };
@@ -46,12 +47,14 @@ function resolveOpenAI(config: LLMConfig): ResolvedModels {
   }
 
   const openai = createOpenAI({ apiKey: process.env.OPENAI_API_KEY });
+  const clustering = config.clusteringModel ?? config.classificationModel;
 
   // Use .chat() (Chat Completions API) rather than the default Responses API:
   // Responses doesn't expose `seed`, which we rely on for run-to-run reproducibility
   // of classify/cluster/refine decisions.
   return {
     classificationModel: openai.chat(config.classificationModel),
+    clusteringModel: openai.chat(clustering),
     draftingModel: openai.chat(config.draftingModel),
     embeddingModel: openai.embeddingModel(config.embeddingModel),
   };
@@ -63,9 +66,11 @@ function resolveAnthropic(config: LLMConfig): ResolvedModels {
   }
 
   const anthropic = createAnthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+  const clustering = config.clusteringModel ?? config.classificationModel;
 
   return {
     classificationModel: anthropic(config.classificationModel),
+    clusteringModel: anthropic(clustering),
     draftingModel: anthropic(config.draftingModel),
     embeddingModel: null, // Anthropic has no embedding API — use LLM clustering
   };
@@ -77,9 +82,11 @@ function resolveGoogle(config: LLMConfig): ResolvedModels {
   }
 
   const google = createGoogleGenerativeAI({ apiKey: process.env.GOOGLE_API_KEY });
+  const clustering = config.clusteringModel ?? config.classificationModel;
 
   return {
     classificationModel: google(config.classificationModel),
+    clusteringModel: google(clustering),
     draftingModel: google(config.draftingModel),
     embeddingModel: google.textEmbeddingModel(config.embeddingModel),
   };

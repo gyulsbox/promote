@@ -78,6 +78,8 @@ export async function analyzeReviewMemory(input: {
     comments: normalized,
     embeddingModel: models.embeddingModel,
     classificationModel: models.classificationModel,
+    clusteringModel: models.clusteringModel,
+    clusteringStrategy: config.llm.clusteringStrategy,
     similarityThreshold: config.thresholds.similarityThreshold,
     costTracker,
     onProgress: (msg) => onProgress("cluster", msg),

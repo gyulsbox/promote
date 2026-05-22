@@ -9,6 +9,7 @@ import { getCandidateById, listCandidates, updateCandidateStatus } from "../../s
 import * as out from "../output.js";
 import { mascotHappy, mascotSays } from "../mascot.js";
 import { printCandidateDetails, runInteractiveReview } from "./review.js";
+import { notifyIfOutdated } from "../update-check.js";
 
 export type PromoteOptions = {
   target?: string;
@@ -66,6 +67,7 @@ export async function applyPromotion(
  * `promote <candidateId>` — load from DB, show details, confirm, apply.
  */
 export async function runPromote(candidateId: string, options: PromoteOptions) {
+  await notifyIfOutdated();
   const config = loadConfig(options.config);
   const { db } = initDatabase();
 
@@ -124,6 +126,7 @@ export async function runPromote(candidateId: string, options: PromoteOptions) {
  * `promote review` — list all pending candidates, let user select, then review selected.
  */
 export async function runReview(options: { config?: string }) {
+  await notifyIfOutdated();
   const config = loadConfig(options.config);
   const { db } = initDatabase();
 
