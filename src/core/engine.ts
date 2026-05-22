@@ -8,7 +8,7 @@ import type {
 } from "./types.js";
 import type { ResolvedModels } from "../llm/provider.js";
 import type { CostTracker } from "../llm/cost-tracker.js";
-import { fetchReviewComments, computeSinceDate } from "../ingest/comment-fetcher.js";
+import { fetchReviewComments, fetchPrConversationComments, computeSinceDate } from "../ingest/comment-fetcher.js";
 import { filterAIReviewComments } from "../filter/ai-reviewer-filter.js";
 import { filterNoise } from "../filter/noise-filter.js";
 import { normalizeComments } from "../normalize/normalizer.js";
@@ -49,11 +49,25 @@ export async function analyzeReviewMemory(input: {
   onProgress("normalize", "Normalizing...");
   const normalized = normalizeComments(kept);
 
-  // 3b. Build reply context map from human replies to bot comments
+  // 3b. Build reply context map from human replies + general PR conversation comments
   onProgress("filter", "Analyzing human reactions...");
+  const prNumbers = new Set(ai.map((c) => c.prNumber));
+  let generalHuman: typeof ai = [];
+  try {
+    generalHuman = await fetchPrConversationComments(octokit, repo, prNumbers, sinceDate, config.aiReviewers);
+  } catch {
+    generalHuman = [];
+  }
+
   let replyContextMap: Awaited<ReturnType<typeof buildReplyContextMap>>;
   try {
-    replyContextMap = await buildReplyContextMap(ai, human, models.classificationModel, costTracker);
+    replyContextMap = await buildReplyContextMap(
+      ai,
+      human,
+      models.classificationModel,
+      costTracker,
+      generalHuman,
+    );
   } catch {
     replyContextMap = new Map();
   }

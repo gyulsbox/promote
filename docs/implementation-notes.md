@@ -254,13 +254,13 @@ This block surfaces all three into the classification pipeline.
 
 ### Coverage limitation
 
-Real-repo runs (trpc/trpc 120d, 389 bot comments) show only ~3% of bot comments receive a recorded reply or reaction. Three reasons:
+Inline-reply rates are low and reactions on bot comments are rare. To improve coverage we also fetch **general PR conversation comments** (`issues.listCommentsForRepo`, filtered to PRs that have bot inline comments) and attribute them to specific bot comments via LLM matching:
 
-1. **Inline reply rate is low** — most bot review-line comments get resolved silently without a textual reply.
-2. **General PR conversation isn't fetched** — `pulls.listReviewCommentsForRepo` (our source) returns inline line-comments only. The general PR thread (`issues.listComments`) where humans more commonly write "lgtm" / "ignore this" is a separate endpoint and not currently merged into the signal pipeline.
-3. **Reactions on bot comments are rare** — humans tend to reply rather than 👍/👎 automated comments.
+- **Inline replies**: linked by `in_reply_to_id`. Heuristic sentiment first, LLM fallback for long-neutral. (D-3, D-4 above)
+- **General PR comments** (new): no `in_reply_to_id` to lean on. For each PR with ≥2 bot inline comments AND ≥1 general human comment, a single `generateObject` call returns `[(humanCommentId, botCommentId | null, sentiment)]` per human comment. PRs with exactly 1 bot comment skip the LLM and attribute all general comments to that bot (sentiment via heuristic).
+- **Reactions**: same as before — `reactions["+1"]` / `["-1"]` from the comment payload.
 
-Scan output prints a `Human signal coverage` line (`X replies + Y reactions / N bot comments`) so users can see the absolute numbers and not mistake sparse signal for a bug. Expanding to `issues.listComments` and joining by PR proximity is a reasonable v0.5 follow-up.
+Scan output prints `Human signal coverage: X replies + Y reactions / N bot comments` so the absolute numbers are visible. Additional LLM cost per scan is ~+30–40% in practice (single matching call per multi-bot PR; the ~$0.10 ceiling for a 120-day trpc/trpc-scale scan).
 
 ### D-1. New types
 **File**: `src/core/types.ts`

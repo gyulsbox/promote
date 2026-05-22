@@ -4,7 +4,7 @@ import { execSync } from "node:child_process";
 import { resolve } from "node:path";
 import chalk from "chalk";
 import { createOctokit, parseRepoRef } from "../../ingest/github-client.js";
-import { fetchReviewComments, computeSinceDate } from "../../ingest/comment-fetcher.js";
+import { fetchReviewComments, fetchPrConversationComments, computeSinceDate } from "../../ingest/comment-fetcher.js";
 import { filterAIReviewComments } from "../../filter/ai-reviewer-filter.js";
 import { filterNoise } from "../../filter/noise-filter.js";
 import { normalizeComments } from "../../normalize/normalizer.js";
@@ -33,6 +33,7 @@ import { mascotSays, mascotHappy } from "../mascot.js";
 import { createTimedSpinner, getClassifyMessage, getDraftMessage, getClusterMessage } from "../thinking.js";
 import { runInteractiveReview } from "./review.js";
 import { applyPromotion } from "./promote.js";
+import { NAME, VERSION } from "../../version.js";
 
 const CLOSING_QUOTES: Record<string, string[]> = {
   en: [
@@ -67,6 +68,7 @@ export async function runScan(options: ScanOptions) {
   const sinceDate = computeSinceDate(sinceDays);
 
   mascotSays(`Scanning ${repo.fullName} (last ${sinceDays} days)`);
+  out.stat("Tool", `${NAME} v${VERSION}`);
 
   const octokit = createOctokit();
   const models = resolveModels(config.llm);
@@ -186,17 +188,37 @@ export async function runScan(options: ScanOptions) {
   out.divider();
 
   // 6. Build reply context map (human replies + reactions on bot comments)
+  // Fetches both inline review-line replies and general PR conversation comments.
+  // General comments lack in_reply_to_id, so they're matched to specific bot
+  // comments via a per-PR LLM call (skipped when the PR has only one bot comment).
+  const prNumbers = new Set(ai.map((c) => c.prNumber));
+  const convSpinner = out.spinner("Fetching PR conversation comments...");
+  let generalHuman: typeof ai = [];
+  try {
+    generalHuman = await fetchPrConversationComments(octokit, repo, prNumbers, sinceDate, config.aiReviewers);
+    convSpinner.succeed(`Fetched ${generalHuman.length} human PR conversation comment(s)`);
+  } catch (err) {
+    convSpinner.fail(`Failed to fetch PR conversation comments: ${err instanceof Error ? err.message : String(err)}`);
+  }
+
+  const matchSpinner = out.spinner("Analyzing human reactions...");
   let replyContextMap: Awaited<ReturnType<typeof buildReplyContextMap>>;
   try {
-    replyContextMap = await buildReplyContextMap(ai, human, models.classificationModel, costTracker);
-  } catch {
+    replyContextMap = await buildReplyContextMap(
+      ai,
+      human,
+      models.classificationModel,
+      costTracker,
+      generalHuman,
+    );
+    matchSpinner.succeed("Analyzed human reactions");
+  } catch (err) {
     replyContextMap = new Map();
+    matchSpinner.fail(`Failed to analyze human reactions: ${err instanceof Error ? err.message : String(err)}`);
   }
 
   // Coverage diagnostic: how many bot comments actually received a human reply
   // or reaction? Low coverage explains sparse Human signal blocks in the digest.
-  // Note: this endpoint (pulls.listReviewCommentsForRepo) returns line-comments
-  // only; general PR conversation lives in issues.listComments and is not fetched.
   let botsWithReply = 0;
   let botsWithReaction = 0;
   for (const ctx of replyContextMap.values()) {
@@ -207,7 +229,7 @@ export async function runScan(options: ScanOptions) {
     "Human signal coverage",
     `${botsWithReply} replies + ${botsWithReaction} reactions / ${ai.length} bot comments` +
       (botsWithReply + botsWithReaction === 0
-        ? chalk.dim(" (most resolved silently; general PR conversation not fetched)")
+        ? chalk.dim(" (no human engagement on the fetched comments)")
         : ""),
   );
 

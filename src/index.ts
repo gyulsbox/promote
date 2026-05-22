@@ -5,6 +5,7 @@ import { runPromote, runReview } from "./cli/commands/promote.js";
 import { initDatabase } from "./storage/db.js";
 import { updateCandidateStatus } from "./storage/repositories.js";
 import * as out from "./cli/output.js";
+import { VERSION } from "./version.js";
 
 // SIGINT: write to stderr (bypasses stdout buffering held by ora/clack spinners),
 // restore cursor (ora hides it by default), exit with conventional 130.
@@ -26,7 +27,7 @@ const program = new Command();
 program
   .name("promote")
   .description("Turn repeated AI review comments into durable repository memory")
-  .version("0.1.2");
+  .version(VERSION);
 
 program
   .command("init")

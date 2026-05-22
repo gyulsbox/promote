@@ -2,6 +2,7 @@ import { generateObject } from "ai";
 import { z } from "zod";
 import type { LanguageModel } from "ai";
 import type { CostTracker } from "../llm/cost-tracker.js";
+import { seedIfSupported } from "../llm/provider.js";
 
 export type ReplySentiment = "agree" | "reject" | "neutral";
 
@@ -73,7 +74,7 @@ export async function classifyAmbiguousReplies(
     schema: batchSchema,
     providerOptions: { openai: { strictJsonSchema: false } },
     temperature: 0,
-    seed: 1,
+    ...seedIfSupported(model),
     system:
       "Classify each reviewer reply as agree (supportive/fixed), reject (dismissive/special-case), or neutral. Return id and sentiment for each.",
     prompt: `Classify these human replies to an AI code review comment:\n\n${list}`,

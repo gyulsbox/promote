@@ -1,4 +1,5 @@
 import { generateObject } from "ai";
+import { seedIfSupported } from "../llm/provider.js";
 import { z } from "zod";
 import type { LanguageModel } from "ai";
 import type { NormalizedComment, Cluster } from "../core/types.js";
@@ -94,7 +95,7 @@ async function singlePassCluster(
     schema: clusterResultSchema,
     providerOptions: { openai: { strictJsonSchema: false } },
     temperature: 0,
-    seed: 1,
+    ...seedIfSupported(model),
     system: `You group similar AI code review comments together.
 Two comments are similar if they point out the same issue, convention, or pattern — even if worded differently or in different languages.
 Do NOT group comments that are about different topics just because they mention the same file.

@@ -1,4 +1,5 @@
 import type { PromotionCandidate, AnalysisStats, PromoteConfig } from "../core/types.js";
+import { NAME, VERSION } from "../version.js";
 
 const TRANSLATIONS: Record<string, {
   title: string;
@@ -68,7 +69,7 @@ export function renderDigest(
   const t = TRANSLATIONS[language] ?? TRANSLATIONS.en;
 
   lines.push(`# ${t.title} — ${repo}`);
-  lines.push(`> ${t.generated} ${date}`);
+  lines.push(`> ${t.generated} ${date} · ${NAME} v${VERSION}`);
   lines.push("");
 
   // Configuration (so the digest is self-describing for later review)
