@@ -216,9 +216,67 @@ BYOK — Bring Your Own Key. No hosted service required.
 
 | Provider | Env var | Notes |
 |---|---|---|
-| **OpenAI** | `OPENAI_API_KEY` | Embedding + classification |
-| **Anthropic** | `ANTHROPIC_API_KEY` | LLM clustering (no extra key needed) |
+| **OpenAI** | `OPENAI_API_KEY` | Embedding + non-reasoning chat models (gpt-4.1 family) |
+| **Anthropic** | `ANTHROPIC_API_KEY` | LLM-direct clustering (no embedding API needed) — **recommended for convention/principle extraction** |
 | **Google** | `GOOGLE_API_KEY` | Free tier at [aistudio.google.com](https://aistudio.google.com/apikey) |
+
+<br />
+
+## Clustering modes
+
+Two paths for grouping repeated comments, with very different output character:
+
+### `quick` mode (default — embedding + HAC)
+
+- **How**: comments are embedded (OpenAI / Google), grouped by cosine similarity, borderline pairs LLM-refined
+- **What surfaces**: narrow, code-level patterns tied to specific files or identifiers
+- **Examples from trpc/trpc (120d, 380 comments)**:
+  - non-null assertion `!` in `www/scripts/check-twoslash.ts`
+  - `@ts-expect-error` needs ≥3-char description (ESLint rule)
+  - `pnpm` version sync between `.tool-versions` and `package.json`
+  - `beforeAll` import from `vitest`
+  - Specific function bug fixes (`callerCallTypeMap`, `querySerializer`, etc.)
+- **Cost / time**: ~$0.07 / ~2 min on 380 comments (OpenAI)
+- **Not available on Anthropic** (no embedding API)
+
+### `broad` mode (LLM-direct clustering)
+
+- **How**: every comment goes through an LLM call grouped semantically by intent, not surface text similarity
+- **What surfaces**: convention / principle / architectural-decision patterns, repo-wide rules
+- **Examples from trpc/trpc (120d, Anthropic Haiku)**:
+  - "Test files must import all utilities (assert, beforeAll, …) explicitly"
+  - "Avoid destructuring directly in function parameter declarations"
+  - "Internal implementation details must not be imported from `src/`; use public unstable API exports"
+  - "Cache invalidation must include generator/tsconfig/artifact existence checks"
+  - "SSE retry budget must not be consumed on initial connection; exclude AbortError"
+- **Cost / time**: ~$0.47 / ~8 min on 380 comments (Anthropic, concurrency=1)
+- **Provider recommendation: Anthropic Claude.** OpenAI broad on tier-1 keys hits rate limits on the larger models (gpt-4.1, gpt-4o) and the mini variants don't produce reliable semantic groupings; Anthropic Haiku 4.5 handles both depth and reliability in one tier.
+
+### Picking a mode
+
+| Cadence | Recommended | Why |
+|---|---|---|
+| **Weekly / biweekly** | OpenAI `quick` (gpt-4.1-mini + nano + embeddings) | Cheap, fast, catches narrow code patterns as they emerge |
+| **Monthly** | Anthropic `broad` (Claude Haiku) | Higher cost but extracts conventions worth memorializing — fewer-but-deeper memory entries |
+| **Quarterly / sprint-end** | Anthropic `broad` + optional `--mode quick` follow-up | Combined coverage: principles from broad, missed code-level from quick |
+
+Switch modes at runtime without touching `.promote.yml`:
+
+```bash
+promote scan --repo owner/repo --since 30d --mode quick    # force embedding+HAC
+promote scan --repo owner/repo --since 90d --mode broad    # force LLM-direct
+```
+
+### Trade-off summary (trpc/trpc 120d, 380 actionable AI comments)
+
+| Mode + provider | Candidates | $ | Wall time | Output style |
+|---|---|---|---|---|
+| OpenAI quick (gpt-4.1-mini + nano) | **24** | $0.07 | 2m 14s | Narrow, file-specific |
+| OpenAI broad (gpt-4.1-mini cluster) | 8 | $0.10 | 2m 39s | Core conventions only — agents-level subset of Anthropic's catch |
+| OpenAI broad (gpt-4.1 full cluster) | — | — | — | Needs OpenAI tier 2+; tier 1 hits rate limits |
+| **Anthropic broad (Haiku 4.5)** | **21** | $0.47 | 8m 17s | **Convention / principle / ADR mix — recommended depth** |
+
+OpenAI broad is positioned as a "no-Anthropic-key" budget alternative — it reliably catches the 6–8 core repo-wide conventions (non-null assertion bans, function-param destructure rules, test-utility imports, CLI version pinning, etc.) at 5× lower cost than Anthropic broad. For full depth (20+ conventions including ADR-worthy decisions) use Anthropic broad.
 
 <br />
 
@@ -243,7 +301,7 @@ promote --help
 `.promote.yml` is created by `promote init`. The example below is the output when **Claude Code** is the chosen AI tool and **Anthropic** is the detected provider — paths and model names vary per tool/provider:
 
 ```yaml
-version: 1
+version: 2
 
 language:
   preferredOutput: en
@@ -269,15 +327,27 @@ thresholds:
   minConfidence: 0.75
 
 llm:
-  provider: anthropic    # openai | anthropic | google — auto-picked from detected env keys
-  classificationModel: claude-sonnet-4-5
+  provider: anthropic         # openai | anthropic | google — auto-picked from detected env keys
+  classificationModel: claude-haiku-4-5
+  clusteringModel: claude-haiku-4-5         # used by LLM-direct clustering (anthropic) + llmRefine (openai/google)
+  clusteringStrategy: llm-direct            # "embedding" (HAC + llmRefine) or "llm-direct" (semantic, principle-level)
   draftingModel: claude-haiku-4-5
-  embeddingModel: text-embedding-3-small   # ignored when provider=anthropic (LLM-only clustering)
+  embeddingModel: text-embedding-3-small    # ignored when clusteringStrategy=llm-direct
 
 privacy:
-  redactSecrets: true        # redact AWS keys, tokens, JWTs before sending to LLM
-  sendDiffHunksToLLM: false  # send code diff context with each comment (improves accuracy, sends code)
+  redactSecrets: true                       # redact AWS keys, tokens, JWTs before sending to LLM
+  sendDiffHunksToLLM: false                 # send code diff context with each comment (improves accuracy, sends code)
 ```
+
+Per-provider defaults that `promote init` will write:
+
+| Provider | classify | cluster | draft | embedding |
+|---|---|---|---|---|
+| **OpenAI** | gpt-4.1-mini | gpt-4.1-mini | gpt-4.1-nano | text-embedding-3-small |
+| **Anthropic** | claude-haiku-4-5 | claude-haiku-4-5 | claude-haiku-4-5 | (n/a) |
+| **Google** | gemini-flash-lite-latest | gemini-flash-lite-latest | gemini-flash-lite-latest | gemini-embedding-001 |
+
+All defaults are **non-reasoning** models — reasoning families (`gpt-5.x`, `o1`/`o3`/`o4`) destabilize the structured JSON outputs the pipeline relies on. Bump to `claude-sonnet-4-6` / `claude-opus-4-7` / `gpt-4.1` (full) manually in `.promote.yml` if you want sharper classification at higher cost (and have an OpenAI tier 2+ key for the full-size GPT path).
 
 > Without a `.promote.yml`, the schema falls back to `provider: openai` with `gpt-4.1-mini` for classification + drafting. Run `promote init` to get a per-tool/per-provider config.
 

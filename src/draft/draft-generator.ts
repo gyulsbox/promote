@@ -1,5 +1,5 @@
 import { generateText } from "ai";
-import { seedIfSupported, temperatureIfSupported } from "../llm/provider.js";
+import { seedIfSupported, temperatureIfSupported, llmProviderOptions } from "../llm/provider.js";
 import type { LanguageModel } from "ai";
 import type { Cluster, RoutingDecision, DraftPromotion } from "../core/types.js";
 import type { CostTracker } from "../llm/cost-tracker.js";
@@ -72,6 +72,7 @@ export async function generateDraft(input: {
 
   const { text, usage } = await generateText({
     model,
+    providerOptions: llmProviderOptions(model),
     ...temperatureIfSupported(model),
     ...seedIfSupported(model),
     system: templatePrompt,

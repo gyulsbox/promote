@@ -146,13 +146,16 @@ export async function runInit() {
       options: [
         {
           value: "embedding",
-          label: "Quick — code-level patterns (recommended)",
+          label: "Quick — code-level patterns (recommended for this provider)",
           hint: "embedding + HAC, narrow patterns tied to specific files/lines, cheapest",
         },
         {
           value: "llm-direct",
           label: "Broad — convention / principle patterns",
-          hint: "LLM-direct semantic clustering, repo-wide rules, ~3x cost",
+          hint:
+            provider === "openai"
+              ? "LLM-direct, deeper rules — but Anthropic Claude is better at this; OpenAI broad on tier-1 produces fewer candidates and tier-1 limits cap full-tier models"
+              : "LLM-direct semantic clustering, repo-wide rules, ~3x cost",
         },
       ],
     });
@@ -381,22 +384,22 @@ function buildProviderOptions(detected: DetectedKey[]) {
       value: "openai",
       label: "OpenAI",
       hint: detectedProviders.has("openai")
-        ? "✓ key detected"
-        : "requires OPENAI_API_KEY",
+        ? "✓ key detected — embedding+HAC clustering (cheap, narrow code-level patterns)"
+        : "embedding+HAC clustering, narrow code-level patterns",
     },
     {
       value: "google",
       label: "Google Gemini",
       hint: detectedProviders.has("google")
-        ? "✓ key detected"
-        : "free tier available",
+        ? "✓ key detected — free tier available"
+        : "free tier available, embedding+HAC clustering",
     },
     {
       value: "anthropic",
       label: "Anthropic (Claude)",
       hint: detectedProviders.has("anthropic")
-        ? "✓ key detected — uses LLM for clustering (no embedding needed)"
-        : "requires ANTHROPIC_API_KEY",
+        ? "✓ key detected — LLM-direct clustering, RECOMMENDED for convention/principle extraction"
+        : "LLM-direct clustering, RECOMMENDED for convention/principle extraction",
     },
   ];
 
