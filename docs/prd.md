@@ -2,10 +2,12 @@
 
 > 반복되는 AI review comment를 사라지는 PR noise가 아니라, repo가 다음 작업에서 다시 읽을 수 있는 durable memory 후보로 승격시키는 도구.
 
+> **Living document caveat.** This PRD captures the original product thesis and design rationale through v0.4. For current behavior (CLI flags, config keys, model defaults, clustering modes, supported providers) consult **`README.md`** — it's the canonical source. Section-by-section inline details below may lag the code; the README + source tree always reflect what actually ships.
+
 - **Working title**: Review Memory Router (shipped as `promote-cli`)
 - **Alternative names**: Promote, Memory Router, Review-to-Memory, Comment Router, Repo Memory Router
 - **Document type**: Product Requirements Document
-- **Status**: v0.4 implementation landed on `claude/review-prd-vwHVq` (2026-05-20). See `docs/implementation-notes.md` for the branch change log.
+- **Status**: v0.4 implementation landed on the v0.2–v0.4 overhaul branch.
 - **Date**: 2026-05-19 (initial) · 2026-05-20 (v0.4 sync)
 - **Primary author**: Hayden
 - **Primary mode**: OSS-first, product-expandable
@@ -512,41 +514,54 @@ Claude Code / AI client
 
 The system must support a repository-level config file.
 
-Suggested file:
+The shipping file is **`.promote.yml`**. See `README.md` for the
+authoritative schema; the snapshot below shows the v2 shape (model defaults
+vary per provider — `promote init` writes the right block for the chosen
+provider):
 
 ```yaml
-# .review-memory-router.yml
-version: 1
+# .promote.yml
+version: 2
 
-aiReviewers:
-  - github-copilot[bot]
-  - coderabbitai[bot]
-  - greptile-apps[bot]
-  - claude[bot]
+language:
+  preferredOutput: en   # en | ja | ko
+
+# aiReviewers:          # bot logins to include — defaults to a curated list
+#   - github-copilot[bot]
+#   - coderabbitai[bot]
 
 memoryTargets:
   agents:
     preferredFiles:
-      - AGENTS.md
-      - CLAUDE.md
-      - .github/copilot-instructions.md
+      - AGENTS.md       # or CLAUDE.md, GEMINI.md, etc., per chosen tool
   pathScoped:
-    preferredDir: .github/instructions
+    preferredDir: .claude/rules
   adr:
     dir: docs/adr
-    template: docs/adr/TEMPLATE.md
-  tests:
-    mode: stub-only
+    filenameFormat: "{number}-{slug}.md"
 
 thresholds:
-  minOccurrences: 3
+  minOccurrences: 2
   windowDays: 60
+  similarityThreshold: 0.80
   minConfidence: 0.75
 
-output:
-  digestMode: markdown
-  createPr: false
+llm:
+  provider: openai      # openai | anthropic | google
+  classificationModel: gpt-4.1-mini
+  clusteringModel: gpt-4.1-mini       # used by LLM-direct clustering + llmRefine
+  clusteringStrategy: embedding       # "embedding" (HAC) or "llm-direct" (semantic)
+  draftingModel: gpt-4.1-nano
+  embeddingModel: text-embedding-3-small
+
+privacy:
+  redactSecrets: true                  # strip AWS keys, tokens, JWTs before LLM
+  sendDiffHunksToLLM: false            # opt-in: send diff context for accuracy
 ```
+
+Removed since the original PRD draft: `output.digestMode`, `output.createPr`,
+`adr.template`, `tests.mode`. `--write` flag and per-target write phase
+collapsed into per-candidate interactive apply during scan.
 
 ### FR-002: Historical PR review comment ingestion
 
@@ -2270,7 +2285,7 @@ This makes the tool complementary rather than adversarial.
 - **v0.4 — human reply/reaction signal** (sentiment classification, per-cluster aggregation, prompt context, confidence adjustment, review UI surfacing, SQLite persistence)
 - **CLI UX** — `--write` removed, per-candidate immediate apply, `promote review` multiselect, stable candidate IDs across scans
 
-See `docs/implementation-notes.md` for the full change log.
+For the full change log, run `git log main..HEAD` on the branch.
 
 ### Phase 3: Headless mode / GitHub Action — *next (v0.5)*
 

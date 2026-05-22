@@ -119,7 +119,7 @@ export async function runScan(options: ScanOptions) {
         : "OpenAI key not detected. How do you want to proceed?",
       options: hasOpenAiKey
         ? [
-            { value: "switch", label: "Switch to OpenAI for this scan (recommended)", hint: "uses OpenAI defaults: gpt-5.4-mini + gpt-5.4-nano" },
+            { value: "switch", label: "Switch to OpenAI for this scan (recommended)", hint: "uses OpenAI defaults: gpt-4.1-mini + gpt-4.1-nano" },
             { value: "broad", label: "Stay on Anthropic and use 'broad' mode instead", hint: "LLM-direct clustering — Claude's natural strength" },
             { value: "cancel", label: "Cancel" },
           ]

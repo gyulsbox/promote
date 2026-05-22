@@ -24,10 +24,6 @@ export function resolveModels(config: LLMConfig): ResolvedModels {
   }
 }
 
-export function hasEmbedding(models: ResolvedModels): boolean {
-  return models.embeddingModel !== null;
-}
-
 /**
  * Returns `{ seed: 1 }` if the model honors the seed parameter (OpenAI Chat
  * Completions), `{}` otherwise. Anthropic and Google ignore seed and emit a
