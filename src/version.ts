@@ -1,4 +1,5 @@
-// Single source of truth for the promote-cli version string.
-// Keep in sync with package.json "version" on every release.
-export const VERSION = "0.1.2";
+// Single source of truth for the promote-cli version string at runtime.
+// Updated automatically by release-please via the x-release-please-version
+// annotation below — DO NOT edit by hand; bump via a release PR.
+export const VERSION = "0.4.0"; // x-release-please-version
 export const NAME = "promote";
