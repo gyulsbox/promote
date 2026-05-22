@@ -32,17 +32,17 @@ const LANG_NAMES: Record<string, string> = {
 
 export function buildClassificationPrompt(input: {
   summary: string;
-  examples: Array<{ prNumber: number; path?: string; excerpt: string }>;
+  examples: Array<{ prNumber: number; path?: string; excerpt: string; severity?: string }>;
   identifiers: string[];
   paths: string[];
   existingMemory: string[];
   outputLanguage?: string;
 }): string {
   const exampleList = input.examples
-    .map(
-      (e, i) =>
-        `${i + 1}. PR #${e.prNumber}${e.path ? ` [${e.path}]` : ""}: ${sanitizeUnicode(e.excerpt)}`,
-    )
+    .map((e, i) => {
+      const sev = e.severity ? `[${e.severity}] ` : "";
+      return `${i + 1}. ${sev}PR #${e.prNumber}${e.path ? ` [${e.path}]` : ""}: ${sanitizeUnicode(e.excerpt)}`;
+    })
     .join("\n");
 
   const identifierList =

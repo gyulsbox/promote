@@ -19,6 +19,13 @@ export type RawReviewComment = {
   updatedAt?: string;
 };
 
+export type SeverityLevel = "blocker" | "important" | "suggestion" | "nit" | "unknown";
+
+export type SeverityMarker = {
+  raw: string | null;
+  level: SeverityLevel;
+};
+
 export type NormalizedComment = {
   id: string;
   originalBody: string;
@@ -26,6 +33,7 @@ export type NormalizedComment = {
   identifiers: string[];
   paths: string[];
   actionVerbs: string[];
+  severityMarker: SeverityMarker;
   language: "en" | "ja" | "ko" | "mixed" | "unknown";
   prNumber: number;
   authorLogin: string;

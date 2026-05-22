@@ -51,6 +51,8 @@ export async function classifyCluster(input: {
     excerpt: redact
       ? redactSecrets(m.normalizedBody.slice(0, 300))
       : m.normalizedBody.slice(0, 300),
+    severity:
+      m.severityMarker.level !== "unknown" ? m.severityMarker.level : undefined,
   }));
 
   // Collect all identifiers and paths across members

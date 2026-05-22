@@ -1,40 +1,31 @@
 import type { RawReviewComment, NormalizedComment } from "../core/types.js";
 import { stripMarkdown } from "./markdown-stripper.js";
 import { sanitizeUnicode } from "./sanitize.js";
+import { stripBotSignatures } from "./bot-stripper.js";
 import {
   extractIdentifiers,
   extractPaths,
   extractActionVerbs,
+  extractSeverityMarker,
   detectLanguage,
 } from "./identifier-extractor.js";
 
-// Known bot signature blocks to remove before normalization
-const BOT_SIGNATURES = [
-  /---\n\n<details>[\s\S]*$/,
-  /<!-- .* -->/g,
-  /\n---\n\n\*\*.*generated.*/gi,
-  /\[!TIP\][\s\S]*?(?=\n\n|\n#|$)/g,
-  /⚡.*CodeRabbit[\s\S]*$/i,
-  /\*This review was.*\*/gi,
-];
-
 export function normalizeComment(comment: RawReviewComment): NormalizedComment {
+  // Extract severity from original body before any stripping
+  const severityMarker = extractSeverityMarker(comment.body);
+
+  // Strip bot signature blocks, then markdown formatting
   let body = sanitizeUnicode(comment.body);
-
-  // Strip bot signature blocks
-  for (const sig of BOT_SIGNATURES) {
-    body = body.replace(sig, "");
-  }
-
-  // Strip markdown formatting
+  body = stripBotSignatures(body, comment.authorLogin);
   const normalizedBody = stripMarkdown(body).trim();
 
-  // Extract structured features from original body (before stripping)
-  // to catch backtick-wrapped identifiers
+  // Detect language first so Ko/Ja verbs can be extracted
+  const language = detectLanguage(normalizedBody);
+
+  // Extract structured features from original body to catch backtick-wrapped identifiers
   const identifiers = extractIdentifiers(comment.body);
   const paths = extractPaths(comment.body, comment.path);
-  const actionVerbs = extractActionVerbs(normalizedBody);
-  const language = detectLanguage(normalizedBody);
+  const actionVerbs = extractActionVerbs(normalizedBody, language);
 
   return {
     id: comment.id,
@@ -43,6 +34,7 @@ export function normalizeComment(comment: RawReviewComment): NormalizedComment {
     identifiers,
     paths,
     actionVerbs,
+    severityMarker,
     language,
     prNumber: comment.prNumber,
     authorLogin: comment.authorLogin,
