@@ -83,7 +83,7 @@ flowchart LR
 - **Classify** — picks a target: agents-level rule, path-scoped rule, ADR, test recommendation, or `none`
 - **Promote** — drafts a patch, links the source comments, hands it to you to approve
 
-Conservative by default — every promotion is human-confirmed, and low-confidence patterns route to `none` instead of guessing.
+Conservative by default — every promotion is human-confirmed, and clusters dropped during classify (low confidence, not promotable, already handled) surface in the digest's `Filtered out` appendix with the classifier's reasoning, instead of being silently discarded.
 
 <br />
 
@@ -126,7 +126,7 @@ Occurrences 3 across 2 PRs
 
 BYOK — you bring your own API key. promote never proxies through a server.
 
-**4. (optional) Save a digest.** Pass `--out` to write the scan results as a markdown summary — handy for PR descriptions, weekly review threads, or CI artifacts.
+**4. (optional) Save a digest.** Every `promote scan` writes a digest to `.promote/digests/{date}.md` by default — pass `--out` to override the path. The digest carries the promotion candidates plus a `Filtered out` appendix listing every cluster the classifier dropped (with its reason), and a `Skipped during review` section if you deferred candidates during interactive review. Handy for PR descriptions, weekly team reviews, or CI artifacts.
 
 ```bash
 promote scan --since 30d --out promote-digest.md
@@ -142,6 +142,7 @@ Output is localized per `language.preferredOutput` in `.promote.yml` (en / ko / 
 - **Multi-tool aware.** Routes the same finding to `CLAUDE.md`, `AGENTS.md`, `.github/copilot-instructions.md`, `.cursor/rules/`, `.windsurf/rules/`, or `GEMINI.md` — pick at `init`, change anytime.
 - **Multi-provider BYOK.** OpenAI, Anthropic, or Google. No hosted backend, no proxy. Free tier available on Google.
 - **Reads human signal.** Picks up reply threads ("this is intentional"), 👍/👎 reactions, and reviewer agreement; boosts confidence when 2+ reviewers concurred, flags `needsHumanDecision` when the original commenter walked it back.
+- **Filter transparency.** Clusters dropped by the classifier (low confidence, not promotable, already handled, classify error) are captured with the LLM's reason and listed under `Filtered out` in the digest. Optionally browsable interactively (Next / Skip remaining) — tune thresholds or sanity-check edge cases in team review.
 - **Evidence trail.** Every promoted rule links back to the PR comments it came from — auditable, not vibes.
 - **Stable candidate IDs.** Same pattern keeps the same ID across rescans, so deferred decisions don't get lost on the next run.
 - **Secret redaction.** AWS keys, tokens, JWTs stripped before any LLM call.
@@ -214,11 +215,11 @@ Full schema, per-provider defaults, env vars, and routing taxonomy → [docs/con
 
 ## Roadmap
 
-**Shipping today** — Personal CLI, multi-tool routing, hybrid clustering, human reply/reaction signal, stable IDs, secret redaction, i18n digest (en / ko / ja).
+**Shipping today** — Personal CLI, multi-tool routing, hybrid clustering, human reply/reaction signal, filter transparency, stable IDs, secret redaction, i18n digest (en / ko / ja).
 
-**Next** — `--create-pr` headless mode + GitHub Action template for weekly digest PRs.
+**Next** — Headless mode for CI/CD: `--create-pr` flag, `--non-interactive` flag for unattended runs, machine-readable output (JSON), and a GitHub Action template for scheduled digest PRs (pick your own cadence).
 
-**Later** — MCP server (use promote from Claude Code / Codex / Copilot directly), eval command for classification accuracy, memory health checks, hosted GitHub App.
+**Later** — eval command for classification accuracy, memory health checks, hosted GitHub App.
 
 <br />
 
