@@ -3,6 +3,7 @@ import type { LanguageModel } from "ai";
 import type { PromotionCandidate } from "../core/types.js";
 import type { CostTracker } from "../llm/cost-tracker.js";
 import { seedIfSupported, temperatureIfSupported, llmProviderOptions } from "../llm/provider.js";
+import { formatConfidence } from "./template.js";
 
 export type TemplateFillFacts = {
   candidates: Array<PromotionCandidate & { targetFile: string }>;
@@ -78,7 +79,7 @@ function renderFacts(facts: TemplateFillFacts): string {
     const c = facts.candidates[i];
     lines.push(`  ${i + 1}. "${c.summary}"`);
     lines.push(`     File: ${c.targetFile}`);
-    lines.push(`     Target: ${c.target}, confidence ${c.confidence}`);
+    lines.push(`     Target: ${c.target}, confidence ${formatConfidence(c.confidence)}`);
     if (c.reasoning) lines.push(`     Reasoning: ${c.reasoning}`);
     const evidence = (c.occurrences ?? []).slice(0, 5);
     if (evidence.length > 0) {
