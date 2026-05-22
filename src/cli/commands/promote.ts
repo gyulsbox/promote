@@ -332,13 +332,51 @@ export async function runReview(options: { config?: string }) {
   }
 }
 
+const KNOWN_AGENT_FILES = new Set([
+  "AGENTS.md",
+  "CLAUDE.md",
+  "GEMINI.md",
+  ".github/copilot-instructions.md",
+  ".cursorrules",
+  ".windsurfrules",
+]);
+
 function isValidFilePath(filePath: string): boolean {
   if (filePath.startsWith("(")) return false;
   if (filePath.includes("—")) return false;
   if (!filePath.includes(".") && !filePath.includes("/")) return false;
+  // Globs / wildcards belong in `applyTo` frontmatter, not file paths.
+  if (filePath.includes("**") || filePath.includes("*") || filePath.includes("?")) return false;
+  // Path traversal / absolute paths shouldn't land in a repo memory file.
+  if (filePath.includes("../") || filePath.startsWith("/")) return false;
   const knownFiles = ["AGENTS.md", "CLAUDE.md", "README.md"];
   if (knownFiles.includes(filePath)) return true;
   if (/\.\w{1,10}$/.test(filePath)) return true;
+  return false;
+}
+
+/**
+ * Whether the LLM's `suggestedFile` is safe to use for the given target.
+ * The LLM picks suggestedFile based on the SCANNED repo's structure, which
+ * is fine for same-repo scans but produces nonsense in cross-repo / foreign
+ * scans (e.g. `packages/foo/src/bar.ts` from trpc applied to a tool repo).
+ * Restricting suggestedFile to known agent files or the configured
+ * path-scoped dir keeps both modes safe.
+ */
+function isAllowedSuggestion(
+  target: string,
+  suggestedFile: string,
+  config: ReturnType<typeof loadConfig>,
+): boolean {
+  if (target === "agents") {
+    return KNOWN_AGENT_FILES.has(suggestedFile);
+  }
+  if (target === "path_scoped_rule") {
+    const dir = config.memoryTargets?.pathScoped?.preferredDir ?? ".github/instructions";
+    const normalizedDir = dir.replace(/\/+$/, "") + "/";
+    if (!suggestedFile.startsWith(normalizedDir)) return false;
+    return /\.(md|mdc)$/.test(suggestedFile);
+  }
   return false;
 }
 
@@ -359,7 +397,11 @@ export function resolveTargetFile(
     return `docs/test-stubs/${slug}.md`;
   }
 
-  if (candidate.suggestedFile && isValidFilePath(candidate.suggestedFile)) {
+  if (
+    candidate.suggestedFile &&
+    isValidFilePath(candidate.suggestedFile) &&
+    isAllowedSuggestion(target, candidate.suggestedFile, config)
+  ) {
     return candidate.suggestedFile;
   }
 
@@ -370,8 +412,13 @@ export function resolveTargetFile(
     }
     case "path_scoped_rule": {
       const dir = config.memoryTargets?.pathScoped?.preferredDir ?? ".github/instructions";
-      const scope = candidate.pathScope ?? "general";
-      const slug = scope.replace(/[/*]/g, "-").replace(/^-+|-+$/g, "") || "rule";
+      // Prefer a summary-derived slug over the pathScope glob — pathScope is
+      // a glob from the scanned repo (e.g. `packages/openapi/**`) and turning
+      // that into a filename produces ugly slugs in cross-repo scans.
+      const slug =
+        toSlug(candidate.summary ?? "") ||
+        (candidate.pathScope ? candidate.pathScope.replace(/[/*]/g, "-").replace(/^-+|-+$/g, "") : "") ||
+        "rule";
       return `${dir}/${slug}.instructions.md`;
     }
     default:
