@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.1](https://github.com/gyulsbox/promote/compare/v0.5.0...v0.5.1) (2026-05-22)
+
+
+### Bug Fixes
+
+* **build:** run pnpm build before npm publish via prepublishOnly ([0a57b8e](https://github.com/gyulsbox/promote/commit/0a57b8ea1a09b9ad1d52310884e7acce0b3ecdd0))
+
 ## [0.5.0](https://github.com/gyulsbox/promote/compare/v0.4.0...v0.5.0) (2026-05-22)
 
 
