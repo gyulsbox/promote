@@ -1,0 +1,20 @@
+diff --git a/CLAUDE.md b/CLAUDE.md
+index 11a22bb..33c44dd 100644
+--- a/CLAUDE.md
++++ b/CLAUDE.md
+@@ -12,3 +12,15 @@
+ ## Testing
+
+ - Run unit tests before changing shared utilities.
++
++## Internal API boundaries
++
++- Do not import from `src/internals/**` directly.
++- Use the public entrypoints (`unstable-internals`, `public`, or `src/index.ts`)
++  so the surface stays controlled.
++- For cross-package imports, route through each package's public exports
++  rather than relative paths into another package's internals.
++- If a new internal capability is needed externally, expose it through a
++  public entrypoint first.
++
++<!-- Promoted from PR #7304, #7228 — see docs/promote/digests/2026-05-22.md -->
