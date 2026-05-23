@@ -5,12 +5,18 @@
 <p><strong>Turn repeated AI review comments into durable repository memory.</strong></p>
 
 <p>
+  <a href="#who-this-is-for">Audience</a> ·
   <a href="#why-promote-cli">Why</a> ·
   <a href="#how-it-works">How</a> ·
   <a href="#quick-start">Quick start</a> ·
   <a href="#what-makes-it-different">Features</a> ·
+  <a href="#examples">Examples</a> ·
+  <a href="#privacy--security">Privacy</a>
+</p>
+<p>
   <a href="#cost--mode-trade-off">Cost</a> ·
   <a href="#cli-reference">CLI</a> ·
+  <a href="#faq">FAQ</a> ·
   <a href="#roadmap">Roadmap</a>
 </p>
 
@@ -25,7 +31,18 @@
 
 <br />
 
-CodeRabbit, Copilot, and Claude review your PRs — and the same suggestions keep coming back. **promote-cli** mines repeated review comments across your PR history, clusters them into patterns, and helps you promote each into a rule your AI tools will read on the next review.
+CodeRabbit, Copilot, Claude, Cursor, and other AI reviewers can be useful, but the same suggestions often come back across PRs.
+
+**promote-cli** scans your PR review history, clusters repeated comments, and helps you promote those patterns into durable repo memory:
+
+- `CLAUDE.md` / `AGENTS.md`
+- GitHub Copilot instructions
+- Cursor / Windsurf / Gemini rules
+- path-scoped rules
+- ADRs
+- test recommendations
+
+It runs locally, uses your own LLM API key, and asks for human approval before writing.
 
 <div align="center">
 
@@ -43,6 +60,19 @@ npm i -g promote-cli
 promote init
 promote scan --since 30d
 ```
+
+<br />
+
+## Who this is for
+
+promote-cli is for teams that:
+
+- use AI reviewers such as CodeRabbit, Copilot, Claude, Cursor, Greptile, Qodo, Devin, or Sourcery
+- keep repo instructions in `CLAUDE.md`, `AGENTS.md`, `.github/copilot-instructions.md`, `.cursor/rules/`, or similar files
+- see the same review comments repeated across PRs
+- want a human-approved way to turn repeated review feedback into durable rules, ADRs, or tests
+
+It is probably not useful if your repo does not use PR review comments or coding-agent instruction files.
 
 <br />
 
@@ -107,7 +137,7 @@ promote init
 promote scan --since 30d
 ```
 
-**3. Review.** Walk through each candidate — promote or skip per item. Approved ones land in your chosen target file immediately.
+**3. Review.** Walk through each candidate — promote or skip per item. Approved ones land in your chosen target file immediately. See [Examples](#examples) for what a real digest and patch look like.
 
 ```
 ─── Candidate 1/7 ───
@@ -170,6 +200,34 @@ Output is localized per `language.preferredOutput` in `.promote.yml` (en / ko / 
 - **Evidence trail.** Every promoted rule links back to the PR comments it came from — auditable, not vibes.
 - **Stable candidate IDs.** Same pattern keeps the same ID across rescans, so deferred decisions don't get lost on the next run.
 - **Secret redaction.** AWS keys, tokens, JWTs stripped before any LLM call.
+
+<br />
+
+## Examples
+
+Want to see real output before installing?
+
+- [Sample quick digest (trpc/trpc, OpenAI `quick`)](examples/digests/sample-quick.md)
+- [Sample broad digest (trpc/trpc, Anthropic `broad`)](examples/digests/sample-broad.md)
+- [`CLAUDE.md` patch example](examples/patches/claude-rule.patch)
+- [Cursor rule patch example](examples/patches/cursor-rule.patch)
+
+Both digests come from real `promote scan` runs against the public [`trpc/trpc`](https://github.com/trpc/trpc) repository.
+
+<br />
+
+## Privacy & security
+
+promote-cli is designed as a local BYOK tool.
+
+- **No hosted backend.** Your comments are never proxied through a promote server.
+- **Your provider key.** LLM calls go directly from your machine or CI runner to OpenAI, Anthropic, or Google.
+- **Secret redaction.** Tokens, AWS keys, JWTs, and similar secrets are stripped before any LLM call (`privacy.redactSecrets: true` by default).
+- **No diff hunks by default.** `privacy.sendDiffHunksToLLM` defaults to `false` — comments are analyzed without sending the surrounding code diff.
+- **Human approval.** In interactive mode, every candidate is reviewed before anything is written.
+- **CI guardrail.** Headless mode can open a PR, but candidates flagged `needs_human_decision` are never auto-applied.
+
+See [`SECURITY.md`](SECURITY.md) for how to report a vulnerability.
 
 <br />
 
@@ -289,6 +347,34 @@ promote scan \
 ```
 
 `--allow-foreign-scan` decouples *where evidence comes from* (the scanned repo's comments) from *where the PR lands* (your current working tree's `origin`). Useful for dogfooding the headless flow safely or for teams who want to mirror conventions from an upstream into their fork.
+
+<br />
+
+## FAQ
+
+### Does promote-cli replace code review?
+
+No. It does not review new code. It mines review history and proposes durable memory updates for patterns that already appeared in PR comments.
+
+### Does it write to my repo automatically?
+
+Interactive mode asks for approval per candidate. Headless CI mode can open a single bundled PR, but candidates that require human judgment (`needs_human_decision`) are never auto-applied — they stay in the digest for local review with `promote review`.
+
+### Does it send my source code to an LLM?
+
+By default, promote-cli analyzes review comments without sending the surrounding diff hunks (`privacy.sendDiffHunksToLLM: false`). You can opt into sending diff context if your team wants higher classification accuracy.
+
+### Does it work with private repositories?
+
+Yes, as long as your GitHub token can read the repository's PR review comments. The tool itself is local-first and never sends comments to a promote-hosted server.
+
+### Which AI tools does it support?
+
+It can write to memory targets used by Claude Code, OpenAI Codex, GitHub Copilot, Cursor, Windsurf, and Gemini CLI. See [`docs/config.md`](docs/config.md) for the full targets matrix.
+
+### Is this a hosted service?
+
+No. promote-cli runs entirely on your machine or your own CI runner. LLM calls go from your environment to your configured provider using your key.
 
 <br />
 
