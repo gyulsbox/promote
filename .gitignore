@@ -7,6 +7,9 @@ dist/
 # this repo's own dogfooding digests — end-user repos should commit these
 docs/promote/digests/
 
+# internal-only product spec — not for npm or public history
+docs/prd.md
+
 # claude code
 .claude/
 
