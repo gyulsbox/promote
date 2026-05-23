@@ -86,7 +86,7 @@ If the same comment appears next week, the team pays the same review cost again.
 
 > *"The human reviewer's role is no longer to trace code details, but to measure the distance between decisions and implementation."*
 
-The name *promote* reflects that shift: review comments aren't disposable noise — they're **knowledge waiting to be elevated** into your repo's durable memory. The decision still yours is *where* it belongs.
+The name *promote* reflects that shift: review comments aren't disposable noise — they're **knowledge waiting to be elevated** into your repo's durable memory. The decision is still yours: whether and where each pattern belongs.
 
 |                              | Without any tool          | Hand-writing AGENTS.md     | With promote-cli                |
 | ---------------------------- | ------------------------- | -------------------------- | ------------------------------- |
@@ -205,7 +205,7 @@ Output is localized per `language.preferredOutput` in `.promote.yml` (en / ko / 
 
 ## Examples
 
-Want to see real output before installing?
+Want to see representative output from real scans before installing?
 
 - [Sample quick digest (trpc/trpc, OpenAI `quick`)](examples/digests/sample-quick.md)
 - [Sample broad digest (trpc/trpc, Anthropic `broad`)](examples/digests/sample-broad.md)
@@ -235,11 +235,11 @@ See [`SECURITY.md`](SECURITY.md) for how to report a vulnerability.
 
 Measured on trpc/trpc, 120-day window, 380 actionable AI comments:
 
-| Mode + provider                        | Candidates | Cost    | Wall time | Output style                                  |
-| -------------------------------------- | ---------- | ------- | --------- | --------------------------------------------- |
-| OpenAI `quick` (gpt-4.1-mini + nano)   | **24**     | $0.07   | 2m 14s    | Narrow, file-specific                         |
-| OpenAI `broad` (gpt-4.1-mini cluster)  | 8          | $0.10   | 2m 39s    | Core conventions only — subset of Anthropic   |
-| **Anthropic `broad` (Haiku 4.5)**      | **21**     | $0.47   | 8m 17s    | **Convention / principle / ADR mix**          |
+| Mode + provider                   | Candidates | Cost  | Wall time | Output style                         |
+| --------------------------------- | ---------- | ----- | --------- | ------------------------------------ |
+| OpenAI `quick`                    | **24**     | $0.07 | 2m 14s    | Narrow, file-specific                |
+| OpenAI `broad`                    | 8          | $0.10 | 2m 39s    | Core conventions only                |
+| **Anthropic `broad` (Haiku 4.5)** | **17**     | $0.45 | 4m 55s    | Convention / principle / ADR mix     |
 
 Picking a mode by cadence:
 
@@ -249,7 +249,7 @@ Picking a mode by cadence:
 | **Monthly**                | Anthropic `broad`                                 | Higher cost but extracts conventions worth memorializing     |
 | **Quarterly / sprint-end** | Anthropic `broad` + optional `--mode quick` follow-up | Combined coverage: principles from broad, code-level from quick |
 
-No Anthropic key? OpenAI `broad` is the "budget" alternative — reliably catches the 6–8 core repo-wide conventions at ~5× lower cost than Anthropic broad, though without the full depth (20+ conventions including ADR-worthy decisions).
+No Anthropic key? OpenAI `broad` is the "budget" alternative — reliably catches the 6–8 core repo-wide conventions at ~5× lower cost than Anthropic broad, though without the same depth of convention / principle / ADR-style candidates.
 
 Full breakdown with examples from each mode → [docs/clustering.md](docs/clustering.md).
 
