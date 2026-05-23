@@ -64,6 +64,7 @@ the Octokit REST API using `GITHUB_TOKEN`, so no extra setup is needed.
 ## Cost control
 
 `promote-cli` only calls the LLM for repeated clusters (≥ `minOccurrences`
-members). For a mid-size repo with ~200 PR review comments over 60 days,
-expect a handful of dollars per scan on default Claude models. See
-[`docs/clustering.md`](../../docs/clustering.md) for the cost breakdown.
+members). For a mid-size repo, expect costs to range from cents to low
+dollars per scan depending on provider, mode, review volume, and whether
+diff context is enabled. See [`docs/clustering.md`](../../docs/clustering.md)
+for the measured breakdown.
