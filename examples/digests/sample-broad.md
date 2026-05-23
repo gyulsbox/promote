@@ -74,7 +74,7 @@ applyTo: "**/*.test.ts"
 - **Scope:** cross-PR (3 PRs)
 - **Occurrences:** 6 comments
 - **Path scope:** `packages/**/package.json`
-- **Human signal:** 3 reviewers agreed (`@orbisai0security`)
+- **Human signal:** 1 reviewer agreed (`@orbisai0security`)
 
 ### Why this was promoted
 
