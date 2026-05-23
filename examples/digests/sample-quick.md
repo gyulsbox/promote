@@ -66,6 +66,8 @@ repo-wide test convention, not a single-PR cleanup.
 - **Scope:** within-PR (1 PR, multi-package)
 - **Occurrences:** 10 comments across 5 packages
 
+> `within-PR` candidates are shown separately from `cross-PR` candidates because some repeated patterns are broad within a single large change, but may not yet justify a repo-wide rule.
+
 ### Why this was promoted
 
 A single PR (#7252) added a `bin.intent` entry across multiple packages,
