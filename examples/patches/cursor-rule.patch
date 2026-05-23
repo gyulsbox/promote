@@ -1,0 +1,20 @@
+diff --git a/.cursor/rules/react-imports.mdc b/.cursor/rules/react-imports.mdc
+new file mode 100644
+index 0000000..1234567
+--- /dev/null
++++ b/.cursor/rules/react-imports.mdc
+@@ -0,0 +1,14 @@
++---
++description: React import conventions in test files
++globs:
++  - "packages/tanstack-react-query/test/**/*.test.tsx"
++---
++
++# React import conventions
++
++- Use the namespace form: `import * as React from 'react'`.
++- Do not use individual named imports (`import { useState } from 'react'`)
++  in TanStack React Query test files.
++- Reference React explicitly (`React.createElement`, `React.useState`).
++
++<!-- Promoted from PR #7362 — see docs/promote/digests/2026-05-22.md -->
