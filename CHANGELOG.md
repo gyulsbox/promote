@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.7.1](https://github.com/gyulsbox/promote/compare/v0.7.0...v0.7.1) (2026-05-23)
+
+
+### Bug Fixes
+
+* **npm:** include docs, examples, and SECURITY.md in published tarball ([465efb4](https://github.com/gyulsbox/promote/commit/465efb46942685e9284e3f54e49a44bbde27efbf))
+
+
+### Docs
+
+* align Anthropic broad numbers across README, docs, and examples ([ebae1e9](https://github.com/gyulsbox/promote/commit/ebae1e97cb7e427be8132936317b6b6e15e8f82c))
+* **examples:** add sample digests and patches from real trpc/trpc runs ([149bd74](https://github.com/gyulsbox/promote/commit/149bd7490c78960fb84b7b2e58cdb0a5df8aa230))
+* pre-HN cleanup and prep 0.7.1 release ([8157e8c](https://github.com/gyulsbox/promote/commit/8157e8cd71bdc6f0655089dc3b55c9fc1a8c7337))
+* **readme:** sharpen positioning and add new sections for launch ([a8c2ef6](https://github.com/gyulsbox/promote/commit/a8c2ef6f0f0ed5af11bee5d19714e716d7f42776))
+* tighten launch copy (Why wording, Examples intro, GH Actions cost, within-PR note) ([88e5f6f](https://github.com/gyulsbox/promote/commit/88e5f6fdb13c3393462348149c601420abeb5b33))
+
+
+### Chores
+
+* **release:** cut 0.7.1 with launch-prep docs ([efb2866](https://github.com/gyulsbox/promote/commit/efb2866fda12c109e15830209b2bb70c53161e7b))
+
 ## [0.7.0](https://github.com/gyulsbox/promote/compare/v0.6.0...v0.7.0) (2026-05-22)
 
 
