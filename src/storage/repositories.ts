@@ -3,6 +3,7 @@ import type { PromoteDB } from "./db.js";
 import { reviewComments, clusters, clusterMembers, candidates, scanRuns } from "./schema.js";
 import type { RawReviewComment, CandidateStatus } from "../core/types.js";
 import { cosineSimilarity } from "../cluster/similarity.js";
+import type { PriorCluster } from "../cluster/identity.js";
 
 export function upsertComments(db: PromoteDB, comments: RawReviewComment[], repo: string) {
   for (const c of comments) {
@@ -109,6 +110,13 @@ export function upsertCandidateRecord(
     .onConflictDoUpdate({
       target: candidates.id,
       set: {
+        // clusterId is deliberately NOT updated. Cross-scan identity keeps a
+        // pattern on its original cluster row (see cluster/identity.ts), so it
+        // never legitimately changes — and because candidate IDs are issued
+        // per-repo ("candidate_001") against a globally unique primary key,
+        // updating it lets a second repo scanned from the same directory
+        // repoint the first repo's candidate at a foreign cluster.
+        clusterFingerprint: record.clusterFingerprint,
         confidence: record.confidence,
         summary: record.summary,
         reason: record.reason,
@@ -163,6 +171,8 @@ export function saveCluster(
     .onConflictDoUpdate({
       target: clusters.id,
       set: {
+        fingerprint,
+        representativeCommentId,
         memberCount,
         ...(embBuf ? { medoidEmbedding: embBuf } : {}),
         updatedAt: new Date().toISOString(),
@@ -209,4 +219,70 @@ export function listCandidates(db: PromoteDB, repo: string, status?: CandidateSt
     .from(candidates)
     .where(eq(candidates.repo, repo))
     .all();
+}
+
+/**
+ * Replace the stored member list for a cluster.
+ *
+ * Written on every scan so that cross-scan identity matching
+ * (`resolveClusterIdentities`) compares against the *latest* membership rather
+ * than whatever the cluster looked like the first time it was seen — otherwise
+ * overlap decays as the cluster grows and continuity is lost anyway.
+ *
+ * Callers must have inserted the cluster row and the member comments first;
+ * `foreign_keys` is ON.
+ */
+export function saveClusterMembers(db: PromoteDB, clusterId: string, commentIds: string[]) {
+  db.delete(clusterMembers).where(eq(clusterMembers.clusterId, clusterId)).run();
+  if (commentIds.length === 0) return;
+  const unique = [...new Set(commentIds)];
+  db.insert(clusterMembers)
+    .values(unique.map((commentId) => ({ clusterId, commentId })))
+    .onConflictDoNothing()
+    .run();
+}
+
+/**
+ * Every cluster from previous scans that carries a candidate, with its member
+ * comment IDs — the input to cross-scan identity matching.
+ *
+ * Clusters with no candidate row are skipped: there is no ID to preserve, so
+ * matching them would only create spurious claims on this scan's clusters.
+ */
+export function listPriorClusters(db: PromoteDB, repo: string): PriorCluster[] {
+  const rows = db
+    .select({
+      clusterId: clusters.id,
+      fingerprint: clusters.fingerprint,
+      candidateId: candidates.id,
+      status: candidates.status,
+    })
+    .from(clusters)
+    .innerJoin(candidates, eq(candidates.clusterId, clusters.id))
+    .where(eq(clusters.repo, repo))
+    .all();
+
+  // Scoped through `clusters` because cluster_members carries no repo column
+  // and one .promote/db.sqlite can hold several repositories.
+  const memberRows = db
+    .select({ clusterId: clusterMembers.clusterId, commentId: clusterMembers.commentId })
+    .from(clusterMembers)
+    .innerJoin(clusters, eq(clusters.id, clusterMembers.clusterId))
+    .where(eq(clusters.repo, repo))
+    .all();
+
+  const byCluster = new Map<string, string[]>();
+  for (const m of memberRows) {
+    const bucket = byCluster.get(m.clusterId);
+    if (bucket) bucket.push(m.commentId);
+    else byCluster.set(m.clusterId, [m.commentId]);
+  }
+
+  return rows.map((r) => ({
+    clusterId: r.clusterId,
+    candidateId: r.candidateId,
+    status: r.status,
+    fingerprint: r.fingerprint,
+    memberIds: byCluster.get(r.clusterId) ?? [],
+  }));
 }

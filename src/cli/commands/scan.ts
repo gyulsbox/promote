@@ -22,9 +22,12 @@ import {
   resetExpiredSnoozes,
   upsertCandidateRecord,
   listCandidates,
+  listPriorClusters,
   saveCluster,
+  saveClusterMembers,
   updateCandidateStatus,
 } from "../../storage/repositories.js";
+import { resolveClusterIdentities } from "../../cluster/identity.js";
 import { buildReplyContextMap } from "../../ingest/reply-context.js";
 import { aggregateHumanSignal } from "../../core/human-signal.js";
 import type { PromotionCandidate, AnalysisStats, SkipReason, SkippedItem } from "../../core/types.js";
@@ -394,14 +397,21 @@ export async function runScan(options: ScanOptions) {
     : "No existing memory files found";
   memSpinner.succeed(`${memBase} ${chalk.dim(`(${out.fmtDuration(timings.memoryScanMs)})`)}`);
 
-  // 8. Pre-assign stable candidate IDs from SQLite
-  // Same cluster fingerprint → same ID across scans. New clusters get max+1.
+  // 8. Pre-assign stable candidate IDs from SQLite.
+  // Identity is resolved by member-comment overlap against previous scans, not
+  // by fingerprint alone — the fingerprint hashes the medoid comment, which
+  // moves whenever a cluster gains a member, so growing patterns used to be
+  // re-issued as brand new candidates and lose their snooze/ignore decision.
+  // See cluster/identity.ts.
+  //
+  // Upgrading from <=0.7: cluster_members was never written, so priors carry
+  // no member IDs and the first 0.8 scan can only match by fingerprint, i.e.
+  // it behaves exactly as before. Membership is recorded at the end of this
+  // run, and overlap matching takes over from the second scan onward.
   const allExisting = listCandidates(db, repo.fullName);
-  const fingerprintToRecord = new Map(
-    allExisting
-      .filter((r) => r.clusterFingerprint)
-      .map((r) => [r.clusterFingerprint!, r]),
-  );
+  const existingById = new Map(allExisting.map((r) => [r.id, r]));
+  const priorClusters = listPriorClusters(db, repo.fullName);
+
   let maxNum = 0;
   for (const r of allExisting) {
     const m = r.id.match(/candidate_(\d+)/);
@@ -409,14 +419,52 @@ export async function runScan(options: ScanOptions) {
   }
   let nextNewNum = maxNum + 1;
 
-  const preAssignedIds = new Map<string, string>(); // fingerprint → candidate ID
-  for (const cluster of repeatedClusters) {
-    const existing = fingerprintToRecord.get(cluster.fingerprint);
-    if (existing?.status === "promoted" || existing?.status === "ignored") continue;
-    preAssignedIds.set(
-      cluster.fingerprint,
-      existing?.id ?? `candidate_${String(nextNewNum++).padStart(3, "0")}`,
-    );
+  const identities = resolveClusterIdentities(
+    repeatedClusters.map((cluster, i) => ({
+      key: String(i),
+      fingerprint: cluster.fingerprint,
+      memberIds: cluster.members.map((m) => m.id),
+    })),
+    priorClusters,
+  );
+
+  /**
+   * Per-cluster decision made before any LLM call. `suppressed` clusters were
+   * already promoted or explicitly ignored, so they never reach classify.
+   * `clusterRowId` is the row this pattern has always been stored under, so
+   * one pattern keeps one row across scans instead of forking a new one every
+   * time its medoid shifts.
+   */
+  type ClusterPlan =
+    | { suppressed: true; reason: "already-promoted" | "already-ignored"; summary: string; clusterRowId: string }
+    | { suppressed: false; candidateId: string; clusterRowId: string };
+
+  const plans: ClusterPlan[] = repeatedClusters.map((cluster, i) => {
+    const prior = identities.get(String(i))?.prior ?? null;
+    const clusterRowId = prior?.clusterId ?? cluster.id;
+    const existing = prior ? existingById.get(prior.candidateId) : undefined;
+
+    if (existing?.status === "promoted" || existing?.status === "ignored") {
+      return {
+        suppressed: true,
+        reason: existing.status === "promoted" ? "already-promoted" : "already-ignored",
+        summary: existing.summary,
+        clusterRowId,
+      };
+    }
+
+    return {
+      suppressed: false,
+      candidateId: existing?.id ?? `candidate_${String(nextNewNum++).padStart(3, "0")}`,
+      clusterRowId,
+    };
+  });
+
+  const inheritedIds = plans.filter(
+    (p, i) => identities.get(String(i))?.matchedBy === "overlap",
+  ).length;
+  if (options.verbose && inheritedIds > 0) {
+    out.info(`${inheritedIds} candidate ID(s) carried over by member overlap (medoid moved).`);
   }
 
   // 9. Classify + Draft (parallel with ordered output)
@@ -485,14 +533,14 @@ export async function runScan(options: ScanOptions) {
   };
 
   const processCluster = async (cluster: typeof repeatedClusters[0], index: number): Promise<void> => {
-    const existing = fingerprintToRecord.get(cluster.fingerprint);
-    if (existing?.status === "promoted" || existing?.status === "ignored") {
+    const plan = plans[index];
+    if (plan.suppressed) {
       resultBuffer[index] = {
         index,
         candidate: null,
-        summary: existing.summary,
+        summary: plan.summary,
         skipped: true,
-        reason: existing.status === "promoted" ? "already-promoted" : "already-ignored",
+        reason: plan.reason,
         clusterFingerprint: cluster.fingerprint,
       };
       flushBuffer();
@@ -554,14 +602,14 @@ export async function runScan(options: ScanOptions) {
         redact: config.privacy.redactSecrets,
       });
 
-      const candidateId = preAssignedIds.get(cluster.fingerprint) ?? `candidate_${String(nextNewNum++).padStart(3, "0")}`;
+      const candidateId = plan.candidateId;
 
       resultBuffer[index] = {
         index,
         candidate: {
           id: candidateId,
           repo: repo.fullName,
-          clusterId: cluster.id,
+          clusterId: plan.clusterRowId,
           clusterFingerprint: cluster.fingerprint,
           summary: decision.summary,
           target: decision.target,
@@ -648,22 +696,28 @@ export async function runScan(options: ScanOptions) {
     out.warn(`${failedClusters} cluster(s) failed during classify/draft and were skipped — see summary line above.`);
   }
 
-  // Persist clusters + candidates to DB for cross-run dedup
-  // Clusters must be inserted first (candidates FK → clusters)
-  const clusterMap = new Map(repeatedClusters.map((c) => [c.id, c]));
-  for (const c of candidates) {
-    const cluster = clusterMap.get(c.clusterId);
-    if (cluster) {
-      saveCluster(
-        db,
-        cluster.id,
-        repo.fullName,
-        cluster.fingerprint,
-        cluster.representative.id,
-        cluster.members.length,
-        cluster.representativeEmbedding,
-      );
-    }
+  // Persist clusters + members + candidates for cross-run identity.
+  //
+  // Every repeated cluster is written, not only the ones that produced a
+  // candidate: a promoted or ignored pattern keeps collecting comments week
+  // after week, and if its stored member list goes stale the overlap match
+  // decays until the pattern resurfaces as a brand new candidate — the exact
+  // failure this is here to prevent.
+  //
+  // Clusters must be inserted before members and candidates (FKs).
+  for (let i = 0; i < repeatedClusters.length; i++) {
+    const cluster = repeatedClusters[i];
+    const rowId = plans[i].clusterRowId;
+    saveCluster(
+      db,
+      rowId,
+      repo.fullName,
+      cluster.fingerprint,
+      cluster.representative.id,
+      cluster.members.length,
+      cluster.representativeEmbedding,
+    );
+    saveClusterMembers(db, rowId, cluster.members.map((m) => m.id));
   }
   for (const c of candidates) {
     upsertCandidateRecord(db, {

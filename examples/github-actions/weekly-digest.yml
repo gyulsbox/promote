@@ -27,17 +27,22 @@ jobs:
         with:
           node-version: 20
 
-      # Persist .promote/ across runs so candidate IDs and cross-run dedup
-      # remain stable week over week. Single key keyed only by repo — the
-      # cache action's behaviour is "restore if matched, save on success" with
-      # a single key, which is what we want for monotonically-evolving state.
-      # (run_id in the key would make every cache entry unique and break
-      # restore — never re-cache-hit.)
+      # Persist .promote/ across runs so candidate IDs, snooze/ignore
+      # decisions, and cross-run dedup survive week over week.
+      #
+      # The key MUST be unique per run, with a prefix in restore-keys.
+      # actions/cache skips the save step entirely on an exact key hit, so a
+      # single fixed key freezes the very first run's state forever: every
+      # later run restores week 1 and saves nothing. A unique key always
+      # misses exactly, so it always saves; restore-keys then falls back to
+      # the newest entry sharing the prefix.
       - name: Restore promote state
         uses: actions/cache@v4
         with:
           path: .promote
-          key: promote-${{ github.repository }}
+          key: promote-${{ github.repository }}-${{ github.run_id }}
+          restore-keys: |
+            promote-${{ github.repository }}-
 
       - name: Configure git identity
         run: |

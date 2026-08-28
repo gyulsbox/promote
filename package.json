@@ -24,8 +24,10 @@
     "build": "tsup",
     "test": "vitest run",
     "test:watch": "vitest",
-    "typecheck": "tsc --noEmit",
-    "prepublishOnly": "pnpm build"
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.scripts.json",
+    "prepublishOnly": "pnpm build",
+    "fixture:capture": "tsx scripts/capture-fixture.ts",
+    "fixture:sweep": "tsx scripts/sweep-fixture.ts"
   },
   "engines": {
     "node": ">=20"
