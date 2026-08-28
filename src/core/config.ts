@@ -5,6 +5,7 @@ import { resolve } from "node:path";
 import chalk from "chalk";
 import type { PromoteConfig } from "./types.js";
 import { migrateConfig, CURRENT_CONFIG_VERSION } from "./migrations.js";
+import { detectEnvironment, type Detection } from "./detect.js";
 
 const promoteConfigSchema = z.object({
   version: z.literal(CURRENT_CONFIG_VERSION),
@@ -108,11 +109,30 @@ const promoteConfigSchema = z.object({
     .default({ sendDiffHunksToLLM: false, redactSecrets: true }),
 });
 
-export function loadConfig(configPath?: string): PromoteConfig {
+export type LoadedConfig = {
+  config: PromoteConfig;
+  /**
+   * What was detected from the checkout and environment, and applied as
+   * defaults. Null when a .promote.yml supplied the values instead - an
+   * existing config file is always authoritative, so nothing is detected over
+   * the top of it.
+   */
+  detection: Detection | null;
+};
+
+/**
+ * Loads .promote.yml, or - when there isn't one - derives the same settings
+ * from the repository and environment.
+ *
+ * No file is created either way. A repository with no .promote.yml is a
+ * supported steady state, not a setup step that has not happened yet.
+ */
+export function loadConfigWithDetection(configPath?: string): LoadedConfig {
   const filePath = configPath ?? resolve(process.cwd(), ".promote.yml");
 
   if (!existsSync(filePath)) {
-    return promoteConfigSchema.parse({ version: CURRENT_CONFIG_VERSION });
+    const detection = detectEnvironment();
+    return { config: promoteConfigSchema.parse(applyDetection(detection)), detection };
   }
 
   const raw = readFileSync(filePath, "utf-8");
@@ -127,7 +147,34 @@ export function loadConfig(configPath?: string): PromoteConfig {
     );
   }
 
-  return promoteConfigSchema.parse(config);
+  return { config: promoteConfigSchema.parse(config), detection: null };
+}
+
+export function loadConfig(configPath?: string): PromoteConfig {
+  return loadConfigWithDetection(configPath).config;
+}
+
+/**
+ * Turns a Detection into the shape promoteConfigSchema parses. Only keys that
+ * were actually detected are set, so the schema's own defaults still cover
+ * everything else.
+ */
+export function applyDetection(detection: Detection): Record<string, unknown> {
+  const memoryTargets: Record<string, unknown> = {
+    agents: { preferredFiles: detection.memoryFiles },
+  };
+  if (detection.pathScopedDir) {
+    memoryTargets.pathScoped = { preferredDir: detection.pathScopedDir };
+  }
+
+  return {
+    version: CURRENT_CONFIG_VERSION,
+    language: { preferredOutput: detection.language },
+    memoryTargets,
+    // Provider is left to the schema default when no key is present, so the
+    // existing "OPENAI_API_KEY is required" error still explains what to do.
+    ...(detection.provider ? { llm: { provider: detection.provider } } : {}),
+  };
 }
 
 export const DEFAULT_CONFIG_CONTENT = `version: 2

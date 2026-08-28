@@ -15,7 +15,8 @@ import { generateDraft } from "../../draft/draft-generator.js";
 import { renderDigest } from "../../digest/digest-renderer.js";
 import { resolveModels } from "../../llm/provider.js";
 import { CostTracker } from "../../llm/cost-tracker.js";
-import { loadConfig } from "../../core/config.js";
+import { loadConfig, loadConfigWithDetection } from "../../core/config.js";
+import { describeDetection } from "../../core/detect.js";
 import { initDatabase } from "../../storage/db.js";
 import {
   upsertComments,
@@ -104,7 +105,12 @@ export async function runScan(options: ScanOptions) {
   };
 
   await notifyIfOutdated();
-  const config = loadConfig(options.config);
+  const { config, detection } = loadConfigWithDetection(options.config);
+  if (detection) {
+    // No .promote.yml, so these values were inferred. Say so once, in one
+    // line, so a wrong guess is visible before the scan spends anything.
+    out.info(describeDetection(detection));
+  }
   const headless = detectHeadless(options);
   const minConfidence = parseMinConfidence(options.minConfidence, config.thresholds.minConfidence);
   const wantCreatePr = options.createPr === true;
