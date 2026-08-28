@@ -28,6 +28,7 @@ import {
   updateCandidateStatus,
 } from "../../storage/repositories.js";
 import { resolveClusterIdentities } from "../../cluster/identity.js";
+import { detectLocalRepo } from "../../core/local-repo.js";
 import { buildReplyContextMap } from "../../ingest/reply-context.js";
 import { aggregateHumanSignal } from "../../core/human-signal.js";
 import type { PromotionCandidate, AnalysisStats, SkipReason, SkippedItem } from "../../core/types.js";
@@ -954,7 +955,7 @@ export async function runScan(options: ScanOptions) {
       if (result.applied) {
         appliedFiles.add(result.targetFile);
         appliedCandidates.push({ ...candidate, targetFile: result.targetFile });
-        updateCandidateStatus(db, candidate.id, "promoted");
+        updateCandidateStatus(db, candidate.repo, candidate.id, "promoted");
       }
     },
     filterSkipped.length > 0 ? { includeSkipped: filterSkipped } : undefined,
@@ -1084,7 +1085,7 @@ async function runHeadlessApplyAndMaybePr(input: HeadlessApplyInput) {
       const result = await applyPromotion(candidate, candidate.target, { suppressPrompts: true });
       if (result.applied) {
         appliedCount++;
-        updateCandidateStatus(input.db, candidate.id, "promoted");
+        updateCandidateStatus(input.db, candidate.repo, candidate.id, "promoted");
       }
     }
     out.stat("Applied", `${appliedCount} candidate(s)`);
@@ -1199,7 +1200,7 @@ async function runHeadlessApplyAndMaybePr(input: HeadlessApplyInput) {
 
     // Atomic DB update — only after PR creation succeeded.
     for (const c of appliedCandidates) {
-      updateCandidateStatus(input.db, c.id, "promoted");
+      updateCandidateStatus(input.db, c.repo, c.id, "promoted");
     }
     // Best-effort: return the user to their original branch so the working
     // tree state mirrors what they had before --create-pr ran.
@@ -1320,22 +1321,8 @@ function toRelative(absPath: string): string {
 }
 
 function detectCurrentRepo(): string {
-  try {
-    const url = execSync("git remote get-url origin", {
-      encoding: "utf-8",
-      stdio: ["pipe", "pipe", "pipe"],
-    }).trim();
-
-    // git@github.com:owner/repo.git
-    const sshMatch = url.match(/github\.com[:/]([^/]+\/[^/.]+)/);
-    if (sshMatch) return sshMatch[1];
-
-    // https://github.com/owner/repo.git
-    const httpsMatch = url.match(/github\.com\/([^/]+\/[^/.]+)/);
-    if (httpsMatch) return httpsMatch[1];
-  } catch {
-    // not a git repo or no remote
-  }
+  const repo = detectLocalRepo();
+  if (repo) return repo;
 
   throw new Error(
     "Could not detect repo. Use --repo owner/repo or run from a git repo with a GitHub remote.",

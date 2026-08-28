@@ -46,8 +46,15 @@ export function getLastFetchedAt(db: PromoteDB, repo: string): string | null {
   return result[0]?.updatedAt ?? null;
 }
 
+/**
+ * Candidate IDs are only unique within a repository - every repo starts again
+ * at candidate_001 - so `repo` is required alongside the id here and in
+ * getCandidateById. Callers that only have a bare id from the command line
+ * resolve the repo first via cli/resolve-candidate.ts.
+ */
 export function updateCandidateStatus(
   db: PromoteDB,
+  repo: string,
   candidateId: string,
   status: CandidateStatus,
   extra?: { ignoreReason?: string; snoozedUntil?: string },
@@ -59,16 +66,31 @@ export function updateCandidateStatus(
       snoozedUntil: extra?.snoozedUntil,
       updatedAt: new Date().toISOString(),
     })
-    .where(eq(candidates.id, candidateId))
+    .where(and(eq(candidates.repo, repo), eq(candidates.id, candidateId)))
     .run();
 }
 
-export function getCandidateById(db: PromoteDB, candidateId: string) {
+export function getCandidateById(db: PromoteDB, repo: string, candidateId: string) {
   return db
     .select()
     .from(candidates)
-    .where(eq(candidates.id, candidateId))
+    .where(and(eq(candidates.repo, repo), eq(candidates.id, candidateId)))
     .get();
+}
+
+/**
+ * Repositories that have a candidate under this id, so a bare id typed on the
+ * command line can be resolved - or reported as ambiguous instead of silently
+ * acting on the wrong repository's candidate.
+ */
+export function findCandidateRepos(db: PromoteDB, candidateId: string): string[] {
+  return db
+    .select({ repo: candidates.repo })
+    .from(candidates)
+    .where(eq(candidates.id, candidateId))
+    .all()
+    .map((r) => r.repo)
+    .sort();
 }
 
 export function getCandidateByClusterFingerprint(
@@ -108,7 +130,7 @@ export function upsertCandidateRecord(
       updatedAt: new Date().toISOString(),
     })
     .onConflictDoUpdate({
-      target: candidates.id,
+      target: [candidates.repo, candidates.id],
       set: {
         // clusterId is deliberately NOT updated. Cross-scan identity keeps a
         // pattern on its original cluster row (see cluster/identity.ts), so it

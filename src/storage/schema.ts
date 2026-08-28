@@ -1,4 +1,4 @@
-import { sqliteTable, text, integer, real, blob } from "drizzle-orm/sqlite-core";
+import { sqliteTable, text, integer, real, blob, primaryKey } from "drizzle-orm/sqlite-core";
 
 export const reviewComments = sqliteTable("review_comments", {
   id: text("id").primaryKey(),
@@ -54,7 +54,7 @@ export const clusterMembers = sqliteTable("cluster_members", {
 });
 
 export const candidates = sqliteTable("candidates", {
-  id: text("id").primaryKey(),
+  id: text("id").notNull(),
   repo: text("repo").notNull(),
   clusterId: text("cluster_id")
     .notNull()
@@ -78,7 +78,11 @@ export const candidates = sqliteTable("candidates", {
   updatedAt: text("updated_at")
     .notNull()
     .$defaultFn(() => new Date().toISOString()),
-});
+}, (table) => [
+  // Candidate IDs restart at candidate_001 in every repository, so the id
+  // alone is not unique across a database that has seen more than one repo.
+  primaryKey({ columns: [table.repo, table.id] }),
+]);
 
 export const scanRuns = sqliteTable("scan_runs", {
   id: text("id").primaryKey(),

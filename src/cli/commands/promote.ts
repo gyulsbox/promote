@@ -7,6 +7,8 @@ import type { PromotionCandidate } from "../../core/types.js";
 import { loadConfig } from "../../core/config.js";
 import { initDatabase } from "../../storage/db.js";
 import { getCandidateById, listCandidates, updateCandidateStatus } from "../../storage/repositories.js";
+import { resolveCandidateScope } from "../resolve-candidate.js";
+import { detectLocalRepo } from "../../core/local-repo.js";
 import * as out from "../output.js";
 import { mascotHappy, mascotSays } from "../mascot.js";
 import { printCandidateDetails, runInteractiveReview } from "./review.js";
@@ -93,7 +95,14 @@ export async function runPromote(candidateId: string, options: PromoteOptions) {
   const config = loadConfig(options.config);
   const { db } = initDatabase();
 
-  const row = getCandidateById(db, candidateId);
+  const scope = resolveCandidateScope(db, candidateId);
+  if (!scope.ok) {
+    out.error(scope.error);
+    if (scope.hint) out.info(scope.hint);
+    return;
+  }
+
+  const row = getCandidateById(db, scope.repo, candidateId);
   if (!row) {
     out.error(`Candidate ${candidateId} not found. Run 'promote scan' first.`);
     return;
@@ -146,7 +155,7 @@ export async function runPromote(candidateId: string, options: PromoteOptions) {
     if (!result.applied) {
       return;
     }
-    updateCandidateStatus(db, candidateId, "promoted");
+    updateCandidateStatus(db, candidate.repo, candidateId, "promoted");
     return;
   }
 
@@ -177,7 +186,7 @@ async function applyAndOpenSinglePr(input: {
     process.exit(1);
   }
 
-  const localRepo = detectLocalRepoSilent();
+  const localRepo = detectLocalRepo();
   const prRepo = localRepo ?? input.candidate.repo;
   if (localRepo && localRepo !== input.candidate.repo) {
     out.info(`PR target: ${chalk.bold(localRepo)} (candidate's source repo was ${input.candidate.repo}).`);
@@ -249,25 +258,12 @@ async function applyAndOpenSinglePr(input: {
       octokit,
     });
     spin.succeed(`PR opened: ${result.url}`);
-    updateCandidateStatus(input.db, input.candidateId, "promoted");
+    updateCandidateStatus(input.db, input.candidate.repo, input.candidateId, "promoted");
     restoreOriginalBranch(ctx);
   } catch (err) {
     spin.fail("PR creation failed.");
     rollbackBranch(ctx, [targetFile]);
     throw err;
-  }
-}
-
-function detectLocalRepoSilent(): string | null {
-  try {
-    const url = execSync("git remote get-url origin", { encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] }).trim();
-    const sshMatch = url.match(/github\.com[:/]([^/]+\/[^/.]+)/);
-    if (sshMatch) return sshMatch[1];
-    const httpsMatch = url.match(/github\.com\/([^/]+\/[^/.]+)/);
-    if (httpsMatch) return httpsMatch[1];
-    return null;
-  } catch {
-    return null;
   }
 }
 
@@ -279,15 +275,7 @@ export async function runReview(options: { config?: string }) {
   const config = loadConfig(options.config);
   const { db } = initDatabase();
 
-  let repo: string;
-  try {
-    const { execSync } = await import("node:child_process");
-    const url = execSync("git remote get-url origin", { encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] }).trim();
-    const match = url.match(/github\.com[:/]([^/]+\/[^/.]+)/);
-    repo = match ? match[1] : "";
-  } catch {
-    repo = "";
-  }
+  const repo = detectLocalRepo();
 
   if (!repo) {
     out.error("No GitHub remote detected on the current directory.");
@@ -353,7 +341,7 @@ export async function runReview(options: { config?: string }) {
     toReview,
     async (candidate, target) => {
       await applyPromotion(candidate, target);
-      updateCandidateStatus(db, candidate.id, "promoted");
+      updateCandidateStatus(db, candidate.repo, candidate.id, "promoted");
     },
   );
 

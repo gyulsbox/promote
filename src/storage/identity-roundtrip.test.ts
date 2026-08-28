@@ -10,6 +10,7 @@ import {
   saveClusterMembers,
   listPriorClusters,
   listCandidates,
+  getCandidateById,
   updateCandidateStatus,
 } from "./repositories.js";
 import { resolveClusterIdentities } from "../cluster/identity.js";
@@ -110,7 +111,7 @@ describe("cross-scan candidate identity (SQLite round-trip)", () => {
       memberIds: ["c1", "c2", "c3"],
       candidateId: "candidate_001",
     });
-    updateCandidateStatus(db, "candidate_001", "ignored", { ignoreReason: "team disagrees" });
+    updateCandidateStatus(db, REPO, "candidate_001", "ignored", { ignoreReason: "team disagrees" });
 
     const resolved = resolve(db, {
       fingerprint: "fp_week2_moved_medoid",
@@ -178,6 +179,62 @@ describe("cross-scan candidate identity (SQLite round-trip)", () => {
     expect(resolved.candidateId).toBe("candidate_001");
   });
 
+  /**
+   * Both repos issue candidate_001, because IDs are numbered per repository.
+   * Before the composite primary key, the second repo's upsert overwrote the
+   * first repo's row outright — same ID, one global key.
+   */
+  function recordSecondRepo() {
+    upsertComments(db, ["x1", "x2", "x3"].map((id, i) => comment(id, 200 + i)), "other/repo");
+    saveCluster(db, "cluster_theirs", "other/repo", "fp_theirs", "x1", 3);
+    saveClusterMembers(db, "cluster_theirs", ["x1", "x2", "x3"]);
+    upsertCandidateRecord(db, {
+      id: "candidate_001",
+      repo: "other/repo",
+      clusterId: "cluster_theirs",
+      clusterFingerprint: "fp_theirs",
+      target: "agents",
+      confidence: 0.4,
+      summary: "a completely unrelated pattern",
+      reason: "n/a",
+      status: "candidate",
+    });
+  }
+
+  it("keeps two repos' candidate_001 rows separate", () => {
+    recordScan(db, {
+      clusterRowId: "cluster_ours",
+      fingerprint: "fp_ours",
+      memberIds: ["c1", "c2", "c3"],
+      candidateId: "candidate_001",
+    });
+    recordSecondRepo();
+
+    const ours = getCandidateById(db, REPO, "candidate_001");
+    const theirs = getCandidateById(db, "other/repo", "candidate_001");
+
+    expect(ours?.summary).toBe("Prefer const over let");
+    expect(ours?.clusterId).toBe("cluster_ours");
+    expect(theirs?.summary).toBe("a completely unrelated pattern");
+    expect(theirs?.clusterId).toBe("cluster_theirs");
+    expect(listCandidates(db, REPO)).toHaveLength(1);
+  });
+
+  it("ignores a candidate in one repo without touching the other's", () => {
+    recordScan(db, {
+      clusterRowId: "cluster_ours",
+      fingerprint: "fp_ours",
+      memberIds: ["c1", "c2", "c3"],
+      candidateId: "candidate_001",
+    });
+    recordSecondRepo();
+
+    updateCandidateStatus(db, REPO, "candidate_001", "ignored");
+
+    expect(getCandidateById(db, REPO, "candidate_001")?.status).toBe("ignored");
+    expect(getCandidateById(db, "other/repo", "candidate_001")?.status).toBe("candidate");
+  });
+
   it("does not leak clusters or members across repos in one database", () => {
     recordScan(db, {
       clusterRowId: "cluster_ours",
@@ -185,26 +242,7 @@ describe("cross-scan candidate identity (SQLite round-trip)", () => {
       memberIds: ["c1", "c2", "c3"],
       candidateId: "candidate_001",
     });
-    // A second repo scanned from the same working directory.
-    upsertComments(db, ["x1", "x2", "x3"].map((id, i) => comment(id, 200 + i)), "other/repo");
-    saveCluster(db, "cluster_theirs", "other/repo", "fp_theirs", "x1", 3);
-    saveClusterMembers(db, "cluster_theirs", ["x1", "x2", "x3"]);
-    upsertCandidateRecord(db, {
-      // A distinct ID: candidates.id is a global primary key while scan issues
-      // per-repo "candidate_001" names, so two repos scanned from the same
-      // working directory collide outright. That is a separate, pre-existing
-      // bug (it needs a composite primary key to fix properly); this test is
-      // about cluster and member scoping, so it steps around the collision.
-      id: "candidate_900",
-      repo: "other/repo",
-      clusterId: "cluster_theirs",
-      clusterFingerprint: "fp_theirs",
-      target: "agents",
-      confidence: 0.9,
-      summary: "unrelated",
-      reason: "n/a",
-      status: "candidate",
-    });
+    recordSecondRepo();
 
     const ours = listPriorClusters(db, REPO);
 

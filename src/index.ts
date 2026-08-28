@@ -4,6 +4,7 @@ import { runScan } from "./cli/commands/scan.js";
 import { runPromote, runReview } from "./cli/commands/promote.js";
 import { initDatabase } from "./storage/db.js";
 import { updateCandidateStatus } from "./storage/repositories.js";
+import { resolveCandidateScope } from "./cli/resolve-candidate.js";
 import * as out from "./cli/output.js";
 import { VERSION } from "./version.js";
 
@@ -145,8 +146,14 @@ program
   .action((candidateId, options) => {
     try {
       const { db } = initDatabase();
-      updateCandidateStatus(db, candidateId, "ignored", { ignoreReason: options.reason });
-      out.success(`Ignored ${candidateId}.`);
+      const scope = resolveCandidateScope(db, candidateId);
+      if (!scope.ok) {
+        out.error(scope.error);
+        if (scope.hint) out.info(scope.hint);
+        process.exit(1);
+      }
+      updateCandidateStatus(db, scope.repo, candidateId, "ignored", { ignoreReason: options.reason });
+      out.success(`Ignored ${candidateId} in ${scope.repo}.`);
     } catch (err) {
       out.error(err instanceof Error ? err.message : String(err));
       process.exit(1);
@@ -163,8 +170,14 @@ program
       const until = new Date();
       until.setDate(until.getDate() + days);
       const { db } = initDatabase();
-      updateCandidateStatus(db, candidateId, "snoozed", { snoozedUntil: until.toISOString() });
-      out.success(`Snoozed ${candidateId} until ${until.toISOString().split("T")[0]}.`);
+      const scope = resolveCandidateScope(db, candidateId);
+      if (!scope.ok) {
+        out.error(scope.error);
+        if (scope.hint) out.info(scope.hint);
+        process.exit(1);
+      }
+      updateCandidateStatus(db, scope.repo, candidateId, "snoozed", { snoozedUntil: until.toISOString() });
+      out.success(`Snoozed ${candidateId} in ${scope.repo} until ${until.toISOString().split("T")[0]}.`);
     } catch (err) {
       out.error(err instanceof Error ? err.message : String(err));
       process.exit(1);
