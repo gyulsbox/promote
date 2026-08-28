@@ -43,6 +43,7 @@ import { notifyIfOutdated } from "../update-check.js";
 import { buildBranchName } from "../../pr/branch.js";
 import { findPullRequestTemplate, buildBundledPrBody, buildBundledPrTitle } from "../../pr/template.js";
 import { fillTemplateWithLlm } from "../../pr/llm-fill.js";
+import { applyPrDecisions } from "../../pr/decisions.js";
 import { createPullRequest, finalizePr, hasGhCli, isGhAuthenticated, prepareBranchForPr, rollbackBranch, restoreOriginalBranch } from "../../pr/create.js";
 
 const CLOSING_QUOTES: Record<string, string[]> = {
@@ -70,6 +71,7 @@ export type ScanOptions = {
   // Commander maps `--no-interactive` to `options.interactive = false`.
   interactive?: boolean;
   minConfidence?: string;
+  maxCandidates?: string;
   createPr?: boolean;
   baseBranch?: string;
   allowForeignScan?: boolean;
@@ -81,6 +83,22 @@ function detectHeadless(options: ScanOptions): boolean {
   if (!process.stdout.isTTY) return true;
   return false;
 }
+
+/**
+ * `--max-candidates`. Defaults to 8: enough to carry the cross-PR candidates
+ * that sort first, few enough that the PR gets read. 0 disables the cap.
+ */
+export function parseMaxCandidates(raw: unknown): number | undefined {
+  if (raw === undefined || raw === null || raw === "") return DEFAULT_MAX_CANDIDATES;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n < 0) {
+    out.warn(`Invalid --max-candidates: "${String(raw)}". Using ${DEFAULT_MAX_CANDIDATES}.`);
+    return DEFAULT_MAX_CANDIDATES;
+  }
+  return n === 0 ? undefined : Math.floor(n);
+}
+
+export const DEFAULT_MAX_CANDIDATES = 8;
 
 function parseMinConfidence(raw: string | undefined, fallback: number): number {
   if (raw === undefined) return fallback;
@@ -113,6 +131,7 @@ export async function runScan(options: ScanOptions) {
   }
   const headless = detectHeadless(options);
   const minConfidence = parseMinConfidence(options.minConfidence, config.thresholds.minConfidence);
+  const maxCandidates = parseMaxCandidates(options.maxCandidates);
   const wantCreatePr = options.createPr === true;
 
   if (wantCreatePr) {
@@ -265,6 +284,25 @@ export async function runScan(options: ScanOptions) {
   const reactivated = resetExpiredSnoozes(db, repo.fullName);
   if (reactivated > 0) {
     out.info(`${reactivated} snoozed candidate(s) reactivated (snooze period expired)`);
+  }
+
+  // Honour the checkboxes a reviewer unchecked in an earlier promote PR.
+  // Runs before classify so a rejected pattern is never paid for twice, and
+  // best-effort: a repo with no PR history, or a token that cannot list PRs,
+  // is a normal state and must not fail the scan.
+  try {
+    const decisions = await applyPrDecisions({ octokit, repo, db });
+    if (decisions.ignored.length > 0) {
+      out.info(
+        `${decisions.ignored.length} candidate(s) ignored — unchecked in ${
+          new Set(decisions.ignored.map((i) => i.prNumber)).size
+        } earlier promote PR(s).`,
+      );
+    }
+  } catch (err) {
+    if (options.verbose) {
+      out.warn(`Could not read decisions from earlier PRs: ${err instanceof Error ? err.message : String(err)}`);
+    }
   }
 
   // 4. Normalize
@@ -916,6 +954,8 @@ export async function runScan(options: ScanOptions) {
   if (headless) {
     await runHeadlessApplyAndMaybePr({
       candidates,
+      skipped: filterSkipped,
+      maxCandidates,
       minConfidence,
       wantCreatePr,
       repo: repo.fullName,
@@ -1000,6 +1040,7 @@ export async function runScan(options: ScanOptions) {
   if (wantCreatePr && appliedCandidates.length > 0) {
     await openBundledPr({
       candidates: appliedCandidates,
+      skipped: filterSkipped,
       files: Array.from(appliedFiles),
       sinceDays,
       stats,
@@ -1043,6 +1084,8 @@ function checkIsLocalRepo(scannedRepo: string): boolean {
 
 type HeadlessApplyInput = {
   candidates: PromotionCandidate[];
+  skipped: SkippedItem[];
+  maxCandidates?: number;
   minConfidence: number;
   wantCreatePr: boolean;
   repo: string;
@@ -1077,6 +1120,21 @@ async function runHeadlessApplyAndMaybePr(input: HeadlessApplyInput) {
   out.divider();
   out.stat("Headless eligible", `${eligible.length} / ${input.candidates.length} candidate(s) ≥ ${input.minConfidence}`);
 
+  // A first PR carrying twenty drafts does not get read. Candidates are
+  // already ordered cross-PR first, so the cap keeps the highest-value ones
+  // and leaves the rest pending for a later scan rather than dropping them.
+  const capped =
+    input.maxCandidates && eligible.length > input.maxCandidates
+      ? eligible.slice(0, input.maxCandidates)
+      : eligible;
+  if (capped.length < eligible.length) {
+    out.info(
+      `Applying the top ${capped.length} of ${eligible.length}. The remaining ${
+        eligible.length - capped.length
+      } stay pending for a later scan (raise with --max-candidates).`,
+    );
+  }
+
   if (eligible.length === 0) {
     out.info("No candidates met the auto-apply criteria. Digest saved; nothing applied.");
     return;
@@ -1087,7 +1145,7 @@ async function runHeadlessApplyAndMaybePr(input: HeadlessApplyInput) {
   // no all-or-nothing PR to gate them on.
   if (!input.wantCreatePr) {
     let appliedCount = 0;
-    for (const candidate of eligible) {
+    for (const candidate of capped) {
       const result = await applyPromotion(candidate, candidate.target, { suppressPrompts: true });
       if (result.applied) {
         appliedCount++;
@@ -1113,14 +1171,14 @@ async function runHeadlessApplyAndMaybePr(input: HeadlessApplyInput) {
   }
 
   const date = new Date();
-  const branchName = buildBranchName({ candidateIds: eligible.map((c) => c.id), date });
+  const branchName = buildBranchName({ candidateIds: capped.map((c) => c.id), date });
   const ctx = prepareBranchForPr({ branch: branchName, baseBranch: input.baseBranch });
 
   const appliedFiles = new Set<string>();
   const appliedCandidates: Array<PromotionCandidate & { targetFile: string }> = [];
 
   try {
-    for (const candidate of eligible) {
+    for (const candidate of capped) {
       const result = await applyPromotion(candidate, candidate.target, { suppressPrompts: true });
       if (result.applied) {
         appliedFiles.add(result.targetFile);
@@ -1170,6 +1228,7 @@ async function runHeadlessApplyAndMaybePr(input: HeadlessApplyInput) {
 
   const body = buildBundledPrBody({
     candidates: appliedCandidates,
+    skipped: input.skipped,
     stats: { prCount: input.stats.prCount },
     sinceDays: input.sinceDays,
     date,
@@ -1220,6 +1279,7 @@ async function runHeadlessApplyAndMaybePr(input: HeadlessApplyInput) {
 
 type BundledPrInput = {
   candidates: Array<PromotionCandidate & { targetFile: string }>;
+  skipped: SkippedItem[];
   files: string[];
   sinceDays: number;
   stats: AnalysisStats;
@@ -1278,6 +1338,7 @@ async function openBundledPr(input: BundledPrInput) {
 
   const body = buildBundledPrBody({
     candidates: input.candidates,
+    skipped: input.skipped,
     stats: { prCount: input.stats.prCount },
     sinceDays: input.sinceDays,
     date,

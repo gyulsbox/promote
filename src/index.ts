@@ -91,6 +91,10 @@ program
     "--create-pr",
     "After applying, open a single bundled PR for all applied candidates. Requires gh auth or GITHUB_TOKEN.",
   )
+  .option(
+    "--max-candidates <n>",
+    "Cap how many candidates one headless run applies and bundles into a PR (default: 8). The rest stay pending and are proposed by a later scan. Use 0 for no cap.",
+  )
   .option("--base-branch <name>", "PR base branch (default: repo's default branch)")
   .option(
     "--allow-foreign-scan",

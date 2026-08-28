@@ -49,6 +49,11 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
+      # The PR body carries a checkbox per candidate. Unchecking one and
+      # leaving the PR open (or closing it) is how the team says no: the next
+      # run reads those boxes back and stops proposing what was rejected.
+      # --max-candidates keeps each PR small enough to actually get read;
+      # anything over the cap waits for a later run rather than being dropped.
       - name: Run promote scan + create PR
         env:
           # Used by gh CLI and the octokit fallback.
@@ -61,4 +66,5 @@ jobs:
           npx -y promote-cli@latest scan \
             --no-interactive \
             --min-confidence 0.85 \
+            --max-candidates 8 \
             --create-pr
